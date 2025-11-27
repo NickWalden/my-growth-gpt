@@ -1,0 +1,6 @@
+streamlit
+openai
+pandas
+requests
+plotly
+st-gsheets-connection
