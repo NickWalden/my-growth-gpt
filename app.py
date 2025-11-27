@@ -2,21 +2,35 @@ import streamlit as st
 import openai
 import pandas as pd
 import requests
-from datetime import datetime
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
-# --- PAGE SETUP ---
-st.set_page_config(page_title="Growth GPT (Debug Mode)", layout="wide")
-st.title("🛠️ Growth GPT: Debug Mode")
+# --- 1. PAGE CONFIGURATION ---
+st.set_page_config(
+    page_title="Growth GPT Pro",
+    page_icon="🚀",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# --- SIDEBAR CONFIG ---
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    if st.button("Clear Chat History"):
-        st.session_state.messages = []
-        st.rerun()
+# Custom CSS for a "Pro" look
+st.markdown("""
+<style>
+    .stMetric {
+        background-color: #1E1E1E;
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #333;
+    }
+    .stDataFrame {
+        border: 1px solid #333;
+        border-radius: 5px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# --- GOOGLE SHEETS MEMORY ---
+# --- 2. MEMORY FUNCTIONS (UNCHANGED) ---
 def load_memory():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -24,9 +38,7 @@ def load_memory():
         if df.empty or "role" not in df.columns:
             return []
         return df.to_dict("records")
-    except Exception as e:
-        # In debug mode, we don't want memory errors to stop us, just print it
-        st.warning(f"Memory Note: Could not load history ({e})")
+    except Exception:
         return []
 
 def save_memory(role, content):
@@ -36,133 +48,242 @@ def save_memory(role, content):
             existing_data = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         except:
             existing_data = pd.DataFrame(columns=["timestamp", "role", "content"])
-            
+        
         new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": content}])
         updated_data = pd.concat([existing_data, new_row], ignore_index=True)
         conn.update(worksheet="ChatHistory", data=updated_data)
     except Exception:
-        pass # Silent fail on save during debug
+        pass
 
-# --- DIAGNOSTIC DATA FETCHING ---
-def fetch_shopify_debug(domain, token):
-    st.write(f"Testing Shopify Connection to: `{domain}`...")
+# --- 3. ADVANCED DATA FETCHING ---
+
+def fetch_shopify_daily(domain, token):
+    """Fetches orders and groups them by day for charting."""
     try:
-        url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&limit=250"
+        # Get last 30 days
+        url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&created_at_min={(datetime.now()-timedelta(days=30)).isoformat()}&limit=250"
         headers = {"X-Shopify-Access-Token": token}
         res = requests.get(url, headers=headers)
         
         if res.status_code == 200:
             orders = res.json().get('orders', [])
-            sales = sum([float(o['total_price']) for o in orders])
-            st.success(f"✅ Shopify Success! Found {len(orders)} orders.")
-            return {"sales": sales, "orders": len(orders), "aov": sales/len(orders) if orders else 0}
-        else:
-            st.error(f"❌ Shopify Error {res.status_code}: {res.text}")
-            return None
-    except Exception as e:
-        st.error(f"❌ Shopify Critical Fail: {e}")
-        return None
+            
+            # Process into DataFrame
+            data = []
+            for o in orders:
+                data.append({
+                    "date": o['created_at'][:10], # Extract YYYY-MM-DD
+                    "sales": float(o['total_price'])
+                })
+            
+            if not data:
+                return None, 0
 
-def fetch_meta_debug(token, account_id):
-    st.write(f"Testing Meta Connection to Account ID: `{account_id}`...")
+            df = pd.DataFrame(data)
+            df['date'] = pd.to_datetime(df['date'])
+            daily_sales = df.groupby('date')['sales'].sum().reset_index()
+            total_sales = df['sales'].sum()
+            
+            return daily_sales, total_sales
+        return None, 0
+    except Exception as e:
+        st.error(f"Shopify Error: {e}")
+        return None, 0
+
+def fetch_meta_campaigns(token, account_id):
+    """Fetches Campaign-level performance."""
     try:
-        # Note: Ensure account_id is just numbers
+        # We add 'level=campaign' to get granular data
         url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
-        params = {'access_token': token, 'date_preset': 'last_30d', 'fields': 'spend,clicks,impressions'}
+        params = {
+            'access_token': token,
+            'date_preset': 'last_30d',
+            'level': 'campaign',
+            'fields': 'campaign_name,spend,purchases,action_values,clicks,impressions'
+        }
         res = requests.get(url, params=params)
         
         if res.status_code == 200:
             data = res.json().get('data', [])
-            if data:
-                summary = data[0]
-                st.success(f"✅ Meta Success! Spend: ${summary.get('spend')}")
-                return {
-                    "spend": float(summary.get('spend', 0)),
-                    "clicks": int(summary.get('clicks', 0)),
-                    "impressions": int(summary.get('impressions', 0))
-                }
-            else:
-                st.warning("⚠️ Meta connected, but returned NO data for last 30d. (Is the account active?)")
-                return {"spend": 0, "clicks": 0, "impressions": 0}
-        else:
-            st.error(f"❌ Meta Error {res.status_code}: {res.text}")
-            return None
+            campaigns = []
+            total_spend = 0
+            
+            for c in data:
+                spend = float(c.get('spend', 0))
+                total_spend += spend
+                # Get purchase value (ROAS numerator)
+                actions = c.get('action_values', [])
+                sales_val = sum([float(a['value']) for a in actions if a['action_type'] == 'purchase'])
+                
+                campaigns.append({
+                    "Campaign": c.get('campaign_name'),
+                    "Spend": spend,
+                    "Sales": sales_val,
+                    "ROAS": round(sales_val / spend, 2) if spend > 0 else 0,
+                    "Clicks": int(c.get('clicks', 0))
+                })
+            
+            return pd.DataFrame(campaigns), total_spend
+        return None, 0
     except Exception as e:
-        st.error(f"❌ Meta Critical Fail: {e}")
-        return None
+        st.error(f"Meta Error: {e}")
+        return None, 0
 
-# --- MAIN LOGIC ---
+# --- 4. MAIN APP LOGIC ---
+
 if 'messages' not in st.session_state:
     st.session_state.messages = load_memory()
 
-# Fetch Data Button
-if st.button("🔄 DEBUG: Analyze Live Data"):
-    # Load keys from Secrets
-    try:
-        s_domain = st.secrets["SHOPIFY_DOMAIN"]
-        s_token = st.secrets["SHOPIFY_TOKEN"]
-        m_token = st.secrets["META_TOKEN"]
-        m_id = st.secrets["META_ACCOUNT_ID"]
-        
-        st.info("Keys loaded from Secrets. Testing connections now...")
-        
-        shop_data = fetch_shopify_debug(s_domain, s_token)
-        meta_data = fetch_meta_debug(m_token, m_id)
-        
-        if shop_data and meta_data:
-            roas = shop_data['sales'] / meta_data['spend'] if meta_data['spend'] > 0 else 0
-            st.session_state['context'] = {
-                "shopify": shop_data, 
-                "meta": meta_data, 
-                "roas": round(roas, 2)
-            }
-            st.success("✅ INTEGRATION COMPLETE: Data Loaded.")
-        
-    except FileNotFoundError:
-        st.error("Secrets file not found. Please check Streamlit Cloud Settings.")
-    except KeyError as e:
-        st.error(f"Missing Key in Secrets: {e}")
-
-# Display Dashboard
-if 'context' in st.session_state:
-    ctx = st.session_state['context']
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Sales (30d)", f"${ctx['shopify']['sales']:,.2f}")
-    c2.metric("Ad Spend", f"${ctx['meta']['spend']:,.2f}")
-    c3.metric("ROAS", f"{ctx['roas']}x")
-
-# Chat Interface
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-if prompt := st.chat_input("Ask about your ads..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    save_memory("user", prompt)
+# Sidebar Setup
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/4712/4712035.png", width=50)
+    st.title("Growth GPT")
+    st.caption("Pro Media Buyer Edition")
+    st.divider()
     
-    # AI Logic
-    try:
-        client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-        context_str = ""
-        if 'context' in st.session_state:
-            context_str = f"CURRENT DATA: {st.session_state['context']}"
-            
-        system_prompt = f"You are an expert Media Buyer. {context_str}. Answer briefly."
+    if st.button("🔄 Refresh Data", type="primary"):
+        with st.spinner("Crunching numbers..."):
+            try:
+                # Load Secrets
+                s_domain = st.secrets["SHOPIFY_DOMAIN"]
+                s_token = st.secrets["SHOPIFY_TOKEN"]
+                m_token = st.secrets["META_TOKEN"]
+                m_id = st.secrets["META_ACCOUNT_ID"]
+                
+                # Fetch Data
+                daily_df, total_sales = fetch_shopify_daily(s_domain, s_token)
+                campaign_df, total_spend = fetch_meta_campaigns(m_token, m_id)
+                
+                if daily_df is not None and campaign_df is not None:
+                    roas = total_sales / total_spend if total_spend > 0 else 0
+                    
+                    st.session_state['context'] = {
+                        "daily_sales": daily_df,
+                        "campaigns": campaign_df,
+                        "total_sales": total_sales,
+                        "total_spend": total_spend,
+                        "roas": roas
+                    }
+                    st.success("Updated!")
+            except Exception as e:
+                st.error(f"Config Error: {e}")
+
+    st.divider()
+    if st.button("🗑️ Clear Chat History"):
+        st.session_state.messages = []
+        st.rerun()
+
+# --- 5. THE DASHBOARD TAB ---
+
+# Organize Layout into Tabs
+tab1, tab2 = st.tabs(["📊 Performance Dashboard", "💬 AI Strategist"])
+
+with tab1:
+    if 'context' in st.session_state:
+        ctx = st.session_state['context']
         
-        stream = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "system", "content": system_prompt}] + 
-                     [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]],
-            stream=True
+        # 1. Top Metrics Row
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Sales (30d)", f"${ctx['total_sales']:,.2f}", delta="Shopify")
+        c2.metric("Ad Spend (30d)", f"${ctx['total_spend']:,.2f}", delta="Meta", delta_color="inverse")
+        c3.metric("ROAS", f"{ctx['roas']:.2f}x", delta="Target: 3.0x", delta_color="normal" if ctx['roas'] > 3 else "off")
+        
+        # Calculate Blended CPA (Cost Per Acquisition) estimate
+        # Note: Requires order count, using simplified math here for UI demo
+        c4.metric("Est. Profit", f"${(ctx['total_sales']*0.6 - ctx['total_spend']):,.2f}", delta="Assuming 60% Margin")
+
+        st.divider()
+
+        # 2. The Chart (Sales Trend)
+        st.subheader("📈 Sales Trend")
+        
+        # Use Plotly for a beautiful interactive chart
+        fig = go.Figure()
+        
+        # Add Sales Bar
+        fig.add_trace(go.Bar(
+            x=ctx['daily_sales']['date'],
+            y=ctx['daily_sales']['sales'],
+            name='Shopify Sales',
+            marker_color='#00CC96'
+        ))
+        
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            margin=dict(l=0, r=0, t=30, b=0),
+            height=350
         )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # 3. Campaign Table
+        st.subheader("🏆 Campaign Performance")
+        st.dataframe(
+            ctx['campaigns'].sort_values("Spend", ascending=False),
+            column_config={
+                "Spend": st.column_config.NumberColumn(format="$%.2f"),
+                "Sales": st.column_config.NumberColumn(format="$%.2f"),
+                "ROAS": st.column_config.NumberColumn(format="%.2fx"),
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+
+    else:
+        st.info("👈 Click 'Refresh Data' in the sidebar to load your dashboard.")
+
+# --- 6. THE CHAT TAB ---
+
+with tab2:
+    st.subheader("Chat with your Data")
+    
+    # Chat container to keep history visible
+    chat_container = st.container()
+    
+    with chat_container:
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+    if prompt := st.chat_input("Analyze my campaigns..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        save_memory("user", prompt)
         
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        
-        st.session_state.messages.append({"role": "assistant", "content": response})
-        save_memory("assistant", response)
-        
-    except Exception as e:
-        st.error(f"AI Error: {e}")
+        # AI Logic
+        try:
+            client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+            
+            # Prepare rich context
+            context_str = ""
+            if 'context' in st.session_state:
+                # Convert dataframes to string summary for AI
+                cmp_summary = st.session_state['context']['campaigns'].to_string(index=False)
+                sales_summary = f"Total Sales: {st.session_state['context']['total_sales']}"
+                context_str = f"LATEST DATA:\n{sales_summary}\n\nCAMPAIGN BREAKDOWN:\n{cmp_summary}"
+            
+            system_prompt = f"""
+            You are a Senior Media Buyer. 
+            Use the data below to answer the user. 
+            Focus on ROAS and Spend efficiency.
+            
+            {context_str}
+            """
+            
+            stream = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "system", "content": system_prompt}] + 
+                         [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]],
+                stream=True
+            )
+            
+            with st.chat_message("assistant"):
+                response = st.write_stream(stream)
+            
+            st.session_state.messages.append({"role": "assistant", "content": response})
+            save_memory("assistant", response)
+            
+        except Exception as e:
+            st.error(f"AI Error: {e}")
