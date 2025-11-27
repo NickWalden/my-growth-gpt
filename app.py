@@ -30,7 +30,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. MEMORY FUNCTIONS (SIMPLIFIED) ---
+# --- 2. MEMORY FUNCTIONS ---
 def load_memory():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -42,29 +42,22 @@ def load_memory():
         return []
 
 def save_memory(role, content):
-    # Simplified to avoid nesting errors
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        
-        # 1. Try to read existing data
         try:
             existing_data = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         except Exception:
             existing_data = pd.DataFrame(columns=["timestamp", "role", "content"])
 
-        # 2. Create new row
         new_row = pd.DataFrame([{
             "timestamp": datetime.now().isoformat(),
             "role": role,
             "content": content
         }])
         
-        # 3. Combine and save
         updated_data = pd.concat([existing_data, new_row], ignore_index=True)
         conn.update(worksheet="ChatHistory", data=updated_data)
-        
     except Exception as e:
-        # Silently fail on write errors to keep app running
         print(f"Save Error: {e}")
 
 # --- 3. DATA FETCHING ---
@@ -239,17 +232,28 @@ with tab2:
         try:
             client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
             
-            context_str = ""
-            if 'context' in st.session_state:
-                cmp_sum = st.session_state['context']['campaigns'].to_string(index=False)
-                context_str = f"DATA:\nSales: {st.session_state['context']['total_sales']}\n\nCAMPAIGNS:\n{cmp_sum}"
-            
-            final_prompt = f"You are a media buyer. Analyze this:\n{context_str}"
+            # --- AGENTIC 'THINKING' UI START ---
+            with st.status("🧠 AI Agent is thinking...", expanded=True) as status:
+                
+                st.write("🔄 Loading Context & Memory...")
+                context_str = ""
+                if 'context' in st.session_state:
+                    cmp_sum = st.session_state['context']['campaigns'].to_string(index=False)
+                    context_str = f"DATA:\nSales: {st.session_state['context']['total_sales']}\n\nCAMPAIGNS:\n{cmp_sum}"
+                
+                st.write("📊 Analyzing Campaign Performance...")
+                final_prompt = f"You are a media buyer. Analyze this:\n{context_str}"
+                
+                status.update(label="✅ Analysis Complete!", state="complete", expanded=False)
+            # --- AGENTIC 'THINKING' UI END ---
+
+            # Increased memory to last 30 messages
+            messages_payload = [{"role": "system", "content": final_prompt}] + \
+                               [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-30:]]
             
             stream = client.chat.completions.create(
                 model="gpt-4o",
-                messages=[{"role": "system", "content": final_prompt}] + 
-                         [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]],
+                messages=messages_payload,
                 stream=True
             )
             
