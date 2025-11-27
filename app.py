@@ -14,19 +14,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for a "Pro" look
+# Custom CSS
 st.markdown("""
 <style>
-    .stMetric {
-        background-color: #1E1E1E;
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #333;
-    }
-    .stDataFrame {
-        border: 1px solid #333;
-        border-radius: 5px;
-    }
+    .stMetric { background-color: #1E1E1E; padding: 15px; border-radius: 10px; border: 1px solid #333; }
+    .stDataFrame { border: 1px solid #333; border-radius: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -49,18 +41,13 @@ def save_memory(role, content):
         except Exception:
             existing_data = pd.DataFrame(columns=["timestamp", "role", "content"])
 
-        new_row = pd.DataFrame([{
-            "timestamp": datetime.now().isoformat(),
-            "role": role,
-            "content": content
-        }])
-        
+        new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": content}])
         updated_data = pd.concat([existing_data, new_row], ignore_index=True)
         conn.update(worksheet="ChatHistory", data=updated_data)
-    except Exception as e:
-        print(f"Save Error: {e}")
+    except Exception:
+        pass
 
-# --- 3. DATA FETCHING ---
+# --- 3. SILENT DATA FETCHING (Returns Error Strings) ---
 
 def fetch_shopify_daily(domain, token):
     try:
@@ -79,17 +66,18 @@ def fetch_shopify_daily(domain, token):
                 })
             
             if not data:
-                return pd.DataFrame(columns=["date", "sales"]), 0
+                # Success but empty
+                return pd.DataFrame(columns=["date", "sales"]), 0, None
 
             df = pd.DataFrame(data)
             df['date'] = pd.to_datetime(df['date'])
             daily_sales = df.groupby('date')['sales'].sum().reset_index()
             total_sales = df['sales'].sum()
-            return daily_sales, total_sales
+            return daily_sales, total_sales, None
         else:
-            return None, 0
-    except Exception:
-        return None, 0
+            return None, 0, f"Shopify Error {res.status_code}: {res.text}"
+    except Exception as e:
+        return None, 0, f"Shopify Crash: {e}"
 
 def fetch_meta_campaigns(token, account_id):
     try:
@@ -108,7 +96,7 @@ def fetch_meta_campaigns(token, account_id):
             total_spend = 0
             
             if not data:
-                return pd.DataFrame(columns=["Campaign", "Spend", "Sales", "ROAS", "Clicks"]), 0
+                return pd.DataFrame(columns=["Campaign", "Spend", "Sales", "ROAS", "Clicks"]), 0, None
             
             for c in data:
                 spend = float(c.get('spend', 0))
@@ -127,16 +115,18 @@ def fetch_meta_campaigns(token, account_id):
                     "Clicks": int(c.get('clicks', 0))
                 })
             
-            return pd.DataFrame(campaigns), total_spend
+            return pd.DataFrame(campaigns), total_spend, None
         else:
-            return None, 0
-    except Exception:
-        return None, 0
+            return None, 0, f"Meta Error {res.status_code}: {res.text}"
+    except Exception as e:
+        return None, 0, f"Meta Crash: {e}"
 
 # --- 4. MAIN APPLICATION ---
 
 if 'messages' not in st.session_state:
     st.session_state.messages = load_memory()
+if 'logs' not in st.session_state:
+    st.session_state.logs = []
 
 # SIDEBAR
 with st.sidebar:
@@ -145,17 +135,27 @@ with st.sidebar:
     st.caption("Pro Media Buyer Edition")
     st.divider()
     
+    # REFRESH BUTTON
     if st.button("🔄 Refresh Data", type="primary"):
         with st.spinner("Connecting..."):
+            # Reset Logs
+            st.session_state.logs = []
+            
             try:
                 s_domain = st.secrets["SHOPIFY_DOMAIN"]
                 s_token = st.secrets["SHOPIFY_TOKEN"]
                 m_token = st.secrets["META_TOKEN"]
                 m_id = st.secrets["META_ACCOUNT_ID"]
                 
-                daily_df, total_sales = fetch_shopify_daily(s_domain, s_token)
-                campaign_df, total_spend = fetch_meta_campaigns(m_token, m_id)
+                # Fetch Data (Notice the 3rd variable is error_msg)
+                daily_df, total_sales, s_err = fetch_shopify_daily(s_domain, s_token)
+                campaign_df, total_spend, m_err = fetch_meta_campaigns(m_token, m_id)
                 
+                # Capture Errors
+                if s_err: st.session_state.logs.append(s_err)
+                if m_err: st.session_state.logs.append(m_err)
+
+                # Process Success
                 if daily_df is not None and campaign_df is not None:
                     roas = total_sales / total_spend if total_spend > 0 else 0
                     st.session_state['context'] = {
@@ -165,11 +165,28 @@ with st.sidebar:
                         "total_spend": total_spend,
                         "roas": roas
                     }
-                    st.success("✅ Data Loaded!")
+                    if not st.session_state.logs:
+                        st.success("✅ Data Updated")
                 else:
-                    st.error("❌ Data fetch failed.")
+                    st.warning("⚠️ Data update partial/failed. Check logs.")
+            
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.session_state.logs.append(f"Config/Secret Error: {e}")
+
+    # LOG DRAWER (The "Little Notification Icon" Feature)
+    st.divider()
+    
+    log_count = len(st.session_state.logs)
+    if log_count > 0:
+        # If errors, show Warning Icon and Count
+        with st.expander(f"⚠️ System Logs ({log_count})", expanded=False):
+            for err in st.session_state.logs:
+                st.error(err)
+    else:
+        # If clean, show Green Check
+        with st.expander("✅ System Status", expanded=False):
+            st.caption("All systems operational.")
+            st.caption(f"Last Check: {datetime.now().strftime('%H:%M')}")
 
     if st.button("🗑️ Clear Chat History"):
         st.session_state.messages = []
@@ -232,9 +249,8 @@ with tab2:
         try:
             client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
             
-            # --- AGENTIC 'THINKING' UI START ---
+            # --- AGENTIC 'THINKING' UI ---
             with st.status("🧠 AI Agent is thinking...", expanded=True) as status:
-                
                 st.write("🔄 Loading Context & Memory...")
                 context_str = ""
                 if 'context' in st.session_state:
@@ -245,11 +261,12 @@ with tab2:
                 final_prompt = f"You are a media buyer. Analyze this:\n{context_str}"
                 
                 status.update(label="✅ Analysis Complete!", state="complete", expanded=False)
-            # --- AGENTIC 'THINKING' UI END ---
-
-            # Increased memory to last 30 messages
+            
+            # 30 Message Memory
+            history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
+            
             messages_payload = [{"role": "system", "content": final_prompt}] + \
-                               [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-30:]]
+                               [{"role": m["role"], "content": m["content"]} for m in history]
             
             stream = client.chat.completions.create(
                 model="gpt-4o",
