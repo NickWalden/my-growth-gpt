@@ -292,7 +292,7 @@ with tab2:
             final_prompt = f"You are an elite Media Buyer. Be concise, tactical, and data-driven.\n\n{context_str}"
             
             stream = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5.1",
                 messages=[{"role": "system", "content": final_prompt}] + 
                          [{"role": m["role"], "content": m["content"]} for m in history],
                 stream=True
