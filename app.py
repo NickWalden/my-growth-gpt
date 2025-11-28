@@ -40,8 +40,11 @@ def get_product_costs(domain, token, variant_ids):
     if not variant_ids: return {}
     cost_map = {}
     try:
-        chunks = [variant_ids[i:i + 50] for i in range(0, len(variant_ids), 50)]
+        # Deduplicate IDs to save API calls
+        unique_ids = list(set(variant_ids))
+        chunks = [unique_ids[i:i + 50] for i in range(0, len(unique_ids), 50)]
         headers = {"X-Shopify-Access-Token": token}
+        
         for chunk in chunks:
             ids_str = ",".join(map(str, chunk))
             url = f"https://{domain}/admin/api/2023-10/variants.json?ids={ids_str}&fields=id,inventory_item_id"
@@ -50,6 +53,7 @@ def get_product_costs(domain, token, variant_ids):
                 vars = res.json().get('variants', [])
                 inv_ids = [v['inventory_item_id'] for v in vars]
                 var_map = {v['inventory_item_id']: v['id'] for v in vars}
+                
                 if inv_ids:
                     inv_str = ",".join(map(str, inv_ids))
                     url2 = f"https://{domain}/admin/api/2023-10/inventory_items.json?ids={inv_str}&fields=id,cost"
@@ -66,88 +70,121 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
     try:
         start_iso = start_date.strftime('%Y-%m-%dT00:00:00')
         end_iso = end_date.strftime('%Y-%m-%dT23:59:59')
-        # Request customer field explicitly
+        
+        # Base URL for first page
         url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&created_at_min={start_iso}&created_at_max={end_iso}&limit=250&fields=id,created_at,total_price,line_items,customer"
         headers = {"X-Shopify-Access-Token": token}
-        res = requests.get(url, headers=headers)
-        if res.status_code == 200:
-            orders = res.json().get('orders', [])
-            all_vids = set()
-            for o in orders:
-                for i in o.get('line_items', []):
-                    if i.get('variant_id'): all_vids.add(i['variant_id'])
-            real_costs = get_product_costs(domain, token, list(all_vids))
+        
+        all_orders = []
+        
+        # --- PAGINATION LOOP (THE FIX) ---
+        while url:
+            res = requests.get(url, headers=headers)
+            if res.status_code != 200:
+                return None, f"Shopify Error {res.status_code}: {res.text}"
             
-            daily_map = {}
-            prod_sales = {}
-            total_rev = 0
-            total_cogs = 0
+            data = res.json()
+            orders = data.get('orders', [])
+            all_orders.extend(orders)
             
-            # Growth Metrics
-            new_cust_rev = 0
-            ret_cust_rev = 0
-            new_orders = 0
+            # Check for 'Link' header to get next page
+            # Shopify returns a header like: <url>; rel="next", <url>; rel="previous"
+            link_header = res.headers.get('Link')
+            url = None # Reset URL to stop loop unless we find a 'next' link
             
-            for o in orders:
-                date = o['created_at'][:10]
-                if date not in daily_map: 
-                    daily_map[date] = {'sales': 0, 'cogs': 0, 'new_sales': 0, 'ret_sales': 0}
-                
-                rev = float(o['total_price'])
-                
-                # --- NEW VS RETURNING LOGIC ---
-                is_new = True # Default to new
-                if 'customer' in o and o['customer']:
-                    # Force int() conversion to handle string responses like "1" or "5"
-                    order_count = int(o['customer'].get('orders_count', 1))
-                    if order_count > 1:
-                        is_new = False
-                
-                if is_new:
-                    new_cust_rev += rev
-                    daily_map[date]['new_sales'] += rev
-                    new_orders += 1
+            if link_header:
+                links = link_header.split(',')
+                for link in links:
+                    if 'rel="next"' in link:
+                        url = link.split(';')[0].strip('<> ')
+        
+        # ---------------------------------
+
+        # Now process ALL orders
+        all_vids = set()
+        for o in all_orders:
+            for i in o.get('line_items', []):
+                if i.get('variant_id'): all_vids.add(i['variant_id'])
+        
+        real_costs = get_product_costs(domain, token, list(all_vids))
+        
+        daily_map = {}
+        prod_sales = {}
+        total_rev = 0
+        total_cogs = 0
+        
+        new_cust_rev = 0
+        ret_cust_rev = 0
+        new_orders = 0
+        
+        for o in all_orders:
+            date = o['created_at'][:10]
+            if date not in daily_map: 
+                daily_map[date] = {'sales': 0, 'cogs': 0, 'new_sales': 0, 'ret_sales': 0}
+            
+            rev = float(o['total_price'])
+            
+            # --- CUSTOMER SEGMENTATION ---
+            is_new = True
+            customer = o.get('customer')
+            if customer:
+                # orders_count includes the current order.
+                # 1 = First time buyer. > 1 = Returning.
+                cnt = customer.get('orders_count')
+                if cnt is not None and int(cnt) > 1:
+                    is_new = False
+            
+            if is_new:
+                new_cust_rev += rev
+                daily_map[date]['new_sales'] += rev
+                new_orders += 1
+            else:
+                ret_cust_rev += rev
+                daily_map[date]['ret_sales'] += rev
+            
+            # -----------------------------
+
+            cogs = 0
+            for i in o.get('line_items', []):
+                vid = i.get('variant_id')
+                price = float(i['price'])
+                qty = i['quantity']
+                # Cost logic
+                if vid in real_costs and real_costs[vid] > 0:
+                    cost = real_costs[vid]
                 else:
-                    ret_cust_rev += rev
-                    daily_map[date]['ret_sales'] += rev
-                # ------------------------------
-
-                cogs = 0
-                for i in o.get('line_items', []):
-                    vid = i.get('variant_id')
-                    price = float(i['price'])
-                    qty = i['quantity']
-                    cost = real_costs.get(vid, price * (1 - fallback_margin))
-                    cogs += (cost * qty)
-                    prod_sales[i['title']] = prod_sales.get(i['title'], 0) + (price * qty)
-                
-                daily_map[date]['sales'] += rev
-                daily_map[date]['cogs'] += cogs
-                total_rev += rev
-                total_cogs += cogs
-
-            df_daily = pd.DataFrame([
-                {'date': k, 'sales': v['sales'], 'cogs': v['cogs'], 
-                 'new_sales': v['new_sales'], 'ret_sales': v['ret_sales']} 
-                for k, v in daily_map.items()
-            ])
+                    cost = price * (1 - fallback_margin)
+                    
+                cogs += (cost * qty)
+                prod_sales[i['title']] = prod_sales.get(i['title'], 0) + (price * qty)
             
-            if not df_daily.empty:
-                df_daily['date'] = pd.to_datetime(df_daily['date'])
-                df_daily = df_daily.sort_values('date')
-                
-            return {
-                "daily_df": df_daily, 
-                "total_sales": total_rev, 
-                "total_cogs": total_cogs,
-                "new_cust_rev": new_cust_rev,
-                "ret_cust_rev": ret_cust_rev,
-                "new_orders": new_orders,
-                "top_products": sorted(prod_sales.items(), key=lambda x: x[1], reverse=True)[:5],
-                "aov": total_rev / len(orders) if len(orders) > 0 else 0,
-                "order_count": len(orders) # Total Order Count
-            }, None
-        else: return None, f"Shopify Error {res.status_code}"
+            daily_map[date]['sales'] += rev
+            daily_map[date]['cogs'] += cogs
+            total_rev += rev
+            total_cogs += cogs
+
+        df_daily = pd.DataFrame([
+            {'date': k, 'sales': v['sales'], 'cogs': v['cogs'], 
+             'new_sales': v['new_sales'], 'ret_sales': v['ret_sales']} 
+            for k, v in daily_map.items()
+        ])
+        
+        if not df_daily.empty:
+            df_daily['date'] = pd.to_datetime(df_daily['date'])
+            df_daily = df_daily.sort_values('date')
+            
+        return {
+            "daily_df": df_daily, 
+            "total_sales": total_rev, 
+            "total_cogs": total_cogs,
+            "new_cust_rev": new_cust_rev,
+            "ret_cust_rev": ret_cust_rev,
+            "new_orders": new_orders,
+            "top_products": sorted(prod_sales.items(), key=lambda x: x[1], reverse=True)[:5],
+            "aov": total_rev / len(all_orders) if len(all_orders) > 0 else 0,
+            "order_count": len(all_orders)
+        }, None
+
     except Exception as e: return None, f"Shopify Crash: {e}"
 
 def fetch_ad_creatives_batch(token, ad_ids):
@@ -315,10 +352,8 @@ def run_sync_logic():
                     df_merged = df_merged.sort_values('date')
                     total_net_profit = df_merged['net_profit'].sum()
                 else: df_merged = pd.DataFrame(); total_net_profit = 0
-                
                 blended_mer = shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
                 ncpa = meta_data['total_spend'] / shop_data['new_orders'] if shop_data['new_orders'] > 0 else 0
-
                 st.session_state['context'] = {
                     "shopify": shop_data, "meta": meta_data, "profit_df": df_merged,
                     "total_net_profit": total_net_profit, "date_range": f"{s_d} to {e_d}",
@@ -395,10 +430,10 @@ with dash_col:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
             
-            # --- 6 COLUMNS NOW (RESTORED ORDERS) ---
+            # --- 6 COLUMNS METRICS ---
             c1, c2, c3, c4, c5, c6 = st.columns(6)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
-            c2.metric("Orders", f"{s_data['order_count']:,}") # RESTORED
+            c2.metric("Orders", f"{s_data['order_count']:,}")
             c3.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
             c4.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
             c5.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
