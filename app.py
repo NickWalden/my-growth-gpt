@@ -9,23 +9,24 @@ import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
-# --- 1. PAGE CONFIGURATION ---
+# --- 1. CONFIGURATION ---
 st.set_page_config(
     page_title="Growth OS",
     page_icon="",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+AI_MODEL = "gpt-4o"
 
-# --- 2. MEMORY FUNCTIONS ---
+# --- 2. MEMORY FUNCTIONS (FIXED) ---
 def load_memory():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         df = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         if df.empty or "role" not in df.columns: return []
         records = df.to_dict("records")
-        # Parse suggestions if stored in the content string
         for r in records:
+            # Deserialize suggestions if present
             if "|||" in str(r['content']):
                 parts = str(r['content']).split("|||")
                 r['content'] = parts[0]
@@ -34,7 +35,7 @@ def load_memory():
         return records
     except Exception: return []
 
-# FIX: Added 'suggestions' argument to prevent crash
+# FIX: Added 'suggestions' argument to definition
 def save_memory(role, content, suggestions=None):
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -242,53 +243,22 @@ def fetch_meta_data(token, account_id, start_date, end_date):
 def generate_briefing(ctx, s_data, m_data):
     try:
         client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-        
-        # Serialize data safely for JSON
-        # We convert any pandas timestamps or floats to standard types
-        def safe_json(obj):
+        # Sanitize data for JSON safety
+        def safe_serialize(obj):
             if isinstance(obj, pd.Timestamp): return obj.isoformat()
             if isinstance(obj, float): return round(obj, 2)
             return str(obj)
-
+            
         analysis_payload = {
             "period": str(ctx.get('date_range')),
-            "metrics": {
-                "net_profit": float(ctx['total_net_profit']), 
-                "revenue": float(s_data['total_sales']), 
-                "ad_spend": float(m_data['total_spend']), 
-                "blended_roas": float(ctx['blended_mer']), 
-                "new_customers": int(s_data['new_orders']), 
-                "ncpa": float(ctx['ncpa'])
-            },
+            "metrics": {"net_profit": ctx['total_net_profit'], "revenue": s_data['total_sales'], "ad_spend": m_data['total_spend'], "blended_roas": ctx['blended_mer'], "new_customers": s_data['new_orders'], "ncpa": ctx['ncpa'], "aov": s_data['aov']},
             "top_products": [str(p[0]) for p in s_data['top_products']],
             "campaigns": m_data['campaign_df'].head(5).to_dict('records')
         }
-        
-        system_prompt = """
-        You are an elite eCommerce Analyst. Analyze the data provided.
-        Return a VALID JSON object with exactly these keys:
-        {
-            "headline": "A short, punchy 1-sentence summary of performance.",
-            "wins": ["Win 1", "Win 2"],
-            "warnings": ["Warning 1", "Warning 2"],
-            "action_plan": "One clear strategic recommendation.",
-            "suggested_questions": ["Question 1", "Question 2", "Question 3"]
-        }
-        Do not include markdown formatting (like ```json). Just the raw JSON string.
-        """
-        
-        # Using safe default=str to catch any non-serializable data
-        response = client.chat.completions.create(
-            model="gpt-4o", 
-            messages=[
-                {"role": "system", "content": system_prompt}, 
-                {"role": "user", "content": json.dumps(analysis_payload, default=str)}
-            ], 
-            response_format={"type": "json_object"}
-        )
+        system_prompt = """You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys: {"headline": "A short, punchy 1-sentence summary.", "wins": ["Bullet 1", "Bullet 2"], "warnings": ["Bullet 1", "Bullet 2"], "action_plan": "One clear strategic recommendation.", "suggested_questions": ["Question 1", "Question 2", "Question 3"]} Do not include markdown formatting. Return RAW JSON only."""
+        response = client.chat.completions.create(model=AI_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload, default=safe_serialize)}], response_format={"type": "json_object"})
         return json.loads(response.choices[0].message.content)
-    except Exception as e: 
-        return {"headline": "Analysis Unavailable", "wins": [], "warnings": [f"Error: {str(e)}"], "action_plan": "Check data connection.", "suggested_questions": []}
+    except Exception: return {"headline": "Analysis Unavailable", "wins": [], "warnings": [], "action_plan": "Check API keys.", "suggested_questions": []}
 
 # --- 5. APP STATE ---
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
@@ -354,21 +324,15 @@ def run_sync_logic():
                     "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
                 }
                 st.session_state['context'] = ctx
-                
                 briefing = generate_briefing(ctx, shop_data, meta_data)
                 
-                # FIX: Construct HTML as a single flat string to avoid indent issues
-                wins_items = "".join([f"<div class='briefing-item'><span class='briefing-icon'>✅</span>{x}</div>" for x in briefing.get('wins', [])])
-                warn_items = "".join([f"<div class='briefing-item'><span class='briefing-icon'>⚠️</span>{x}</div>" for x in briefing.get('warnings', [])])
+                # FIX: FLATTENED HTML TO PREVENT MARKDOWN INDENTATION ISSUES
+                wins_html = "".join([f"<div class='briefing-item'><span class='briefing-icon'>✅</span>{x}</div>" for x in briefing.get('wins', [])])
+                warn_html = "".join([f"<div class='briefing-item'><span class='briefing-icon'>⚠️</span>{x}</div>" for x in briefing.get('warnings', [])])
+                briefing_html = f"<div class='briefing-card'><div class='briefing-head'>⚡ DAILY INTELLIGENCE</div><div style='font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;'>{briefing.get('headline')}</div><div style='margin-bottom: 10px;'><div style='color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WINS</div>{wins_html}</div><div style='margin-bottom: 10px;'><div style='color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WARNINGS</div>{warn_html}</div><div style='margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;'><div style='color: #0A84FF; font-size: 12px; font-weight: 600;'>RECOMMENDATION</div><div style='font-size: 13px; color: #ccc;'>{briefing.get('action_plan')}</div></div></div>"
                 
-                briefing_html = f"<div class='briefing-card'><div class='briefing-head'>⚡ DAILY INTELLIGENCE</div><div style='font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;'>{briefing.get('headline')}</div><div style='margin-bottom: 10px;'><div style='color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WINS</div>{wins_items}</div><div style='margin-bottom: 10px;'><div style='color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WARNINGS</div>{warn_items}</div><div style='margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;'><div style='color: #0A84FF; font-size: 12px; font-weight: 600;'>RECOMMENDATION</div><div style='font-size: 13px; color: #ccc;'>{briefing.get('action_plan')}</div></div></div>"
-                
-                st.session_state.messages.append({
-                    "role": "assistant", "content": briefing_html, 
-                    "suggestions": briefing.get('suggested_questions', [])
-                })
+                st.session_state.messages.append({"role": "assistant", "content": briefing_html, "suggestions": briefing.get('suggested_questions', [])})
                 save_memory("assistant", briefing_html, briefing.get('suggested_questions', []))
-                
                 st.session_state.last_synced_dates = (s_d, e_d)
                 if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
             else: st.toast("Sync Failed", icon="⚠️")
@@ -379,7 +343,7 @@ if st.session_state.last_synced_dates != (s_d, e_d): run_sync_logic()
 # --- 7. CSS ---
 st.markdown(f"""
 <style>
-    @import url('[https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap](https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap)');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; background-color: #000; color: #fff; height: 100vh; overflow: hidden !important; }}
     header[data-testid="stHeader"] {{ background-color: transparent !important; z-index: 999; pointer-events: none; }}
     header[data-testid="stHeader"] button {{ pointer-events: auto; }}
@@ -388,6 +352,7 @@ st.markdown(f"""
     div[data-testid="column"] {{ height: 88vh; overflow-y: auto; overflow-x: hidden; display: block; }}
     div[data-testid="column"]:nth-of-type(2) > div {{ padding-bottom: 150px !important; }}
     [data-testid="stChatInput"] {{ position: fixed !important; bottom: 0 !important; right: 1.5rem !important; left: auto !important; width: {chat_width_pct-2}% !important; min-width: 300px; background-color: #111 !important; z-index: 9999 !important; border-top: 1px solid #333; padding-top: 15px !important; padding-bottom: 25px !important; }}
+    
     .chat-bubble, .chat-bubble *, .briefing-card, .briefing-card * {{ font-size: {font_size}px !important; line-height: 1.4; }}
     .chat-bubble {{ padding: 12px 16px; border-radius: 18px; max-width: 85%; position: relative; word-wrap: break-word; margin-bottom: 4px; display: inline-block; }}
     .user-bubble {{ background-color: #0A84FF; color: white; border-bottom-right-radius: 2px; }}
@@ -395,7 +360,8 @@ st.markdown(f"""
     .chat-row {{ display: flex; margin-bottom: 12px; width: 100%; }}
     .user-row {{ justify-content: flex-end; }}
     .bot-row {{ justify-content: flex-start; }}
-    div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
+    
+    /* GALLERY STYLES */
     .ad-card {{ background-color: #111; border: 1px solid #222; border-radius: 12px; overflow: hidden; margin-bottom: 20px; transition: transform 0.2s; position: relative; display: flex; flex-direction: column; }}
     .ad-card:hover {{ border-color: #444; transform: translateY(-2px); z-index: 10; }}
     .ad-image-container {{ position: relative; width: 100%; height: 220px; background-color: #000; overflow: hidden; }}
@@ -411,6 +377,8 @@ st.markdown(f"""
     .context-tag {{ font-size: 10px; background: #222; padding: 2px 6px; border-radius: 4px; color: #888; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
     .btn-view {{ display: block; width: 100%; text-align: center; background: #222; color: #ccc; font-size: 11px; padding: 6px 0; border-radius: 6px; margin-top: 8px; transition: background 0.2s; }}
     .btn-view:hover {{ background: #333; color: white; }}
+    
+    /* LIST VIEW */
     .list-row {{ display: flex; background: #111; border: 1px solid #222; border-radius: 12px; margin-bottom: 10px; overflow: hidden; transition: all 0.2s; color: inherit; text-decoration: none; }}
     .list-row:hover {{ border-color: #444; transform: translateX(4px); }}
     .list-img {{ width: 100px; height: 100px; object-fit: cover; border-right: 1px solid #222; }}
@@ -419,6 +387,10 @@ st.markdown(f"""
     .list-metrics {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; text-align: right; min-width: 250px; font-size: 11px; color: #888; }}
     .list-val {{ font-size: 13px; font-weight: 600; color: #eee; }}
     .list-badge {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; margin-left: 10px; }}
+    
+    /* METRICS */
+    div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
+    
     .briefing-card {{ background: #1E1E1E; border: 1px solid #0A84FF; border-radius: 12px; padding: 15px; margin-bottom: 20px; }}
     .briefing-head {{ color: #0A84FF; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; }}
     .briefing-item {{ margin-bottom: 4px; display: flex; align-items: flex-start; }}
@@ -439,6 +411,7 @@ with dash_col:
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
+            
             c1, c2, c3, c4, c5, c6 = st.columns(6)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
             c2.metric("Orders", f"{s_data['order_count']:,}")
@@ -478,18 +451,18 @@ with dash_col:
                         cols = st.columns(3)
                         for i, ad in enumerate(ads):
                             with cols[i % 3]:
-                                img_src = ad.get('image_url') or "[https://via.placeholder.com/300x300/222/888?text=No+Image](https://via.placeholder.com/300x300/222/888?text=No+Image)"
+                                img_src = ad.get('image_url') or "https://via.placeholder.com/300x300/222/888?text=No+Image"
                                 roas_val = ad['roas']
                                 badge_color = "rgba(0, 200, 83, 0.9); color: #fff;" if roas_val >= 3.0 else "rgba(255, 214, 0, 0.9); color: #000;" if roas_val >= 1.5 else "rgba(255, 61, 0, 0.9); color: #fff;"
-                                link = ad.get('link') or f"[https://www.facebook.com/ads/library/?id=](https://www.facebook.com/ads/library/?id=){ad['id']}"
-                                st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="ad-card"><div class="ad-image-container"><div class="ad-bg" style="background-image: url('{img_src}');"></div><img src="{img_src}" class="ad-image" onerror="this.src='[https://via.placeholder.com/300x300/222/888?text=Video+Ad](https://via.placeholder.com/300x300/222/888?text=Video+Ad)'"><div class="ad-link-icon">↗</div><div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div></div><div class="ad-footer"><div class="ad-title" title="{ad['name']}">{ad['name']}</div><div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div><div class="grid-stats"><div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div><div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div><div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div><div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div><div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div><div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div></div><div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div></div></div></a>""", unsafe_allow_html=True)
+                                link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
+                                st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="ad-card"><div class="ad-image-container"><div class="ad-bg" style="background-image: url('{img_src}');"></div><img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'"><div class="ad-link-icon">↗</div><div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div></div><div class="ad-footer"><div class="ad-title" title="{ad['name']}">{ad['name']}</div><div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div><div class="grid-stats"><div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div><div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div><div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div><div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div><div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div><div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div></div><div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div></div></div></a>""", unsafe_allow_html=True)
                     else:
                         for ad in ads:
-                            img_src = ad.get('image_url') or "[https://via.placeholder.com/100x100/222/888?text=Img](https://via.placeholder.com/100x100/222/888?text=Img)"
+                            img_src = ad.get('image_url') or "https://via.placeholder.com/100x100/222/888?text=Img"
                             roas_val = ad['roas']
                             badge_color = "#00E676" if roas_val >= 3.0 else "#FFD600" if roas_val >= 1.5 else "#FF3D00"
-                            link = ad.get('link') or f"[https://www.facebook.com/ads/library/?id=](https://www.facebook.com/ads/library/?id=){ad['id']}"
-                            st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="list-row"><img src="{img_src}" class="list-img" onerror="this.src='[https://via.placeholder.com/100x100/222/888?text=Ad](https://via.placeholder.com/100x100/222/888?text=Ad)'"><div class="list-content"><div class="list-info"><div style="font-weight:600; color:#fff; font-size:13px; margin-bottom:4px;">{ad['name']}</div><div style="font-size:11px; color:#666;">{ad['campaign']} • Live {ad['days_live']}d</div></div><div class="list-metrics"><div>Spend <div class="list-val">${ad['spend']:,.0f}</div></div><div>Sales <div class="list-val">{ad['purchases']}</div></div><div>CPA <div class="list-val">${ad['cpa']:.2f}</div></div><div>ROAS <div class="list-val" style="color:{badge_color}">{roas_val}x</div></div></div></div></div></a>""", unsafe_allow_html=True)
+                            link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
+                            st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="list-row"><img src="{img_src}" class="list-img" onerror="this.src='https://via.placeholder.com/100x100/222/888?text=Ad'"><div class="list-content"><div class="list-info"><div style="font-weight:600; color:#fff; font-size:13px; margin-bottom:4px;">{ad['name']}</div><div style="font-size:11px; color:#666;">{ad['campaign']} • Live {ad['days_live']}d</div></div><div class="list-metrics"><div>Spend <div class="list-val">${ad['spend']:,.0f}</div></div><div>Sales <div class="list-val">{ad['purchases']}</div></div><div>CPA <div class="list-val">${ad['cpa']:.2f}</div></div><div>ROAS <div class="list-val" style="color:{badge_color}">{roas_val}x</div></div></div></div></div></a>""", unsafe_allow_html=True)
                 else: st.info("No active creatives found in this date range.")
             with tab4:
                 st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
