@@ -37,48 +37,54 @@ st.markdown("""
         border-bottom: 1px solid #1C1C1E;
     }
 
-    /* CUSTOM CHAT BUBBLES (The iMessage Fix) */
-    .chat-row {
-        display: flex;
-        margin-bottom: 20px;
-        width: 100%;
+    /* --- FIXED CHAT INPUT (THE FIX) --- */
+    [data-testid="stChatInput"] {
+        position: fixed !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        width: 100% !important;
+        padding: 20px !important;
+        background-color: #000000 !important; /* Solid Black Background */
+        z-index: 99 !important; /* Above content, below sidebar */
+        border-top: 1px solid #1C1C1E; /* Subtle border */
     }
     
-    .user-row {
-        justify-content: flex-end; /* Align to Right */
+    /* Ensure the text box inside doesn't hit the edges on huge screens */
+    [data-testid="stChatInput"] > div {
+        max-width: 1000px;
+        margin: 0 auto;
     }
-    
-    .bot-row {
-        justify-content: flex-start; /* Align to Left */
-    }
+
+    /* CUSTOM CHAT BUBBLES */
+    .chat-row { display: flex; margin-bottom: 20px; width: 100%; }
+    .user-row { justify-content: flex-end; }
+    .bot-row { justify-content: flex-start; }
 
     .chat-bubble {
         padding: 15px 20px;
         border-radius: 20px;
-        max-width: 70%; /* THE 70% WIDTH FIX */
+        max-width: 70%;
         font-size: 16px;
         line-height: 1.5;
         position: relative;
         word-wrap: break-word;
     }
 
-    /* User Bubble Style (Blue, Right) */
     .user-bubble {
         background-color: #007AFF;
         color: white;
-        border-bottom-right-radius: 4px; /* Subtle 'speech' edge */
+        border-bottom-right-radius: 4px;
         box-shadow: 0 2px 5px rgba(0,0,0,0.2);
     }
 
-    /* Bot Bubble Style (Grey, Left) */
     .bot-bubble {
-        background-color: #1C1C1E; /* Dark Grey */
+        background-color: #1C1C1E;
         color: #E5E5EA;
         border: 1px solid #2C2C2E;
         border-bottom-left-radius: 4px;
     }
     
-    /* Avatar Icons */
     .avatar {
         width: 35px;
         height: 35px;
@@ -89,8 +95,8 @@ st.markdown("""
         margin: 0 10px;
         font-size: 18px;
     }
-    .user-avatar { background-color: #1C1C1E; order: 2; } /* Icon on right */
-    .bot-avatar { background-color: #2C2C2E; order: 0; }  /* Icon on left */
+    .user-avatar { background-color: #1C1C1E; order: 2; }
+    .bot-avatar { background-color: #2C2C2E; order: 0; }
 
     /* METRICS & CARDS */
     div[data-testid="stMetric"] {
@@ -102,7 +108,9 @@ st.markdown("""
     
     /* CLEANUP */
     header[data-testid="stHeader"] { background-color: transparent; }
-    .block-container { padding-bottom: 150px; }
+    
+    /* PADDING AT BOTTOM SO LAST MESSAGE ISNT HIDDEN BEHIND INPUT */
+    .block-container { padding-bottom: 140px !important; }
 
 </style>
 """, unsafe_allow_html=True)
@@ -234,15 +242,13 @@ with tab1:
     else:
         st.info("Tap 'Sync Data' to initialize dashboard.")
 
-# CHAT TAB (REBUILT WITH CUSTOM HTML)
+# CHAT TAB
 with tab2:
     chat_container = st.container()
     
-    # 1. RENDER CHAT HISTORY USING CUSTOM HTML
     with chat_container:
         for msg in st.session_state.messages:
             if msg["role"] == "user":
-                # User: Right Aligned, Blue
                 st.markdown(f"""
                 <div class="chat-row user-row">
                     <div class="chat-bubble user-bubble">{msg['content']}</div>
@@ -250,7 +256,6 @@ with tab2:
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                # Assistant: Left Aligned, Grey
                 st.markdown(f"""
                 <div class="chat-row bot-row">
                     <div class="avatar bot-avatar">🤖</div>
@@ -258,20 +263,13 @@ with tab2:
                 </div>
                 """, unsafe_allow_html=True)
 
-    # 2. CHAT INPUT
     if prompt := st.chat_input("Ask a question..."):
-        # Append to state
         st.session_state.messages.append({"role": "user", "content": prompt})
         save_memory("user", prompt)
-        
-        # We need to rerun immediately to show the user's message in the HTML loop above
-        # But we also need to generate the response. 
-        # Trick: We display the user message *visually* once here before the rerun happens later.
         
         try:
             client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
             
-            # Show "Thinking" Status
             with st.status("Thinking...", expanded=True) as status:
                 context_str = ""
                 if 'context' in st.session_state:
@@ -279,7 +277,6 @@ with tab2:
                     context_str = f"DATA:\nSales: {st.session_state['context']['total_sales']}\n\nCAMPAIGNS:\n{cmp_sum}"
                 status.update(label="Complete", state="complete", expanded=False)
             
-            # Generate AI Response
             history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
             final_prompt = f"You are an elite Media Buyer. Be concise, tactical, and data-driven.\n\n{context_str}"
             
@@ -289,13 +286,11 @@ with tab2:
                 stream=True
             )
             
-            # Collect stream
             response_text = ""
             for chunk in stream:
                 if chunk.choices[0].delta.content:
                     response_text += chunk.choices[0].delta.content
             
-            # Save and Rerun
             st.session_state.messages.append({"role": "assistant", "content": response_text})
             save_memory("assistant", response_text)
             st.rerun()
