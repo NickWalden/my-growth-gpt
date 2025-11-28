@@ -4,7 +4,7 @@ import pandas as pd
 import requests
 import plotly.graph_objects as go
 import json
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
 # --- 1. PAGE CONFIGURATION ---
@@ -41,32 +41,27 @@ def get_product_costs(domain, token, variant_ids):
     cost_map = {}
     try:
         chunks = [variant_ids[i:i + 50] for i in range(0, len(variant_ids), 50)]
-        inventory_item_ids = []
-        variant_to_inventory = {}
         headers = {"X-Shopify-Access-Token": token}
-
         for chunk in chunks:
             ids_str = ",".join(map(str, chunk))
+            # 1. Get Inventory Item IDs
             url = f"https://{domain}/admin/api/2023-10/variants.json?ids={ids_str}&fields=id,inventory_item_id"
             res = requests.get(url, headers=headers)
             if res.status_code == 200:
                 vars = res.json().get('variants', [])
-                for v in vars:
-                    variant_to_inventory[v['id']] = v['inventory_item_id']
-                    inventory_item_ids.append(v['inventory_item_id'])
-
-        if inventory_item_ids:
-            inv_chunks = [inventory_item_ids[i:i + 50] for i in range(0, len(inventory_item_ids), 50)]
-            for chunk in inv_chunks:
-                ids_str = ",".join(map(str, chunk))
-                url = f"https://{domain}/admin/api/2023-10/inventory_items.json?ids={ids_str}&fields=id,cost"
-                res = requests.get(url, headers=headers)
-                if res.status_code == 200:
-                    items = res.json().get('inventory_items', [])
-                    inv_cost_map = {item['id']: float(item['cost'] or 0) for item in items}
-                    for vid, inv_id in variant_to_inventory.items():
-                        if inv_id in inv_cost_map:
-                            cost_map[vid] = inv_cost_map[inv_id]
+                inv_ids = [v['inventory_item_id'] for v in vars]
+                var_map = {v['inventory_item_id']: v['id'] for v in vars}
+                
+                # 2. Get Costs
+                if inv_ids:
+                    inv_str = ",".join(map(str, inv_ids))
+                    url2 = f"https://{domain}/admin/api/2023-10/inventory_items.json?ids={inv_str}&fields=id,cost"
+                    res2 = requests.get(url2, headers=headers)
+                    if res2.status_code == 200:
+                        items = res2.json().get('inventory_items', [])
+                        for item in items:
+                            vid = var_map.get(item['id'])
+                            if vid: cost_map[vid] = float(item['cost'] or 0)
     except Exception: pass
     return cost_map
 
@@ -80,83 +75,84 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
         
         if res.status_code == 200:
             orders = res.json().get('orders', [])
-            all_variant_ids = set()
+            
+            # Fetch Real Costs
+            all_vids = set()
             for o in orders:
-                for item in o.get('line_items', []):
-                    if item.get('variant_id'):
-                        all_variant_ids.add(item['variant_id'])
-            real_costs = get_product_costs(domain, token, list(all_variant_ids))
+                for i in o.get('line_items', []):
+                    if i.get('variant_id'): all_vids.add(i['variant_id'])
+            real_costs = get_product_costs(domain, token, list(all_vids))
             
             daily_map = {}
-            product_sales = {}
-            total_revenue = 0
+            prod_sales = {}
+            total_rev = 0
             total_cogs = 0
             
             for o in orders:
                 date = o['created_at'][:10]
                 if date not in daily_map: daily_map[date] = {'sales': 0, 'cogs': 0}
-                order_rev = float(o['total_price'])
-                order_cogs = 0
-                for item in o.get('line_items', []):
-                    vid = item.get('variant_id')
-                    price = float(item['price'])
-                    qty = item['quantity']
-                    item_cost = real_costs[vid] if (vid in real_costs and real_costs[vid] > 0) else price * (1 - fallback_margin)
-                    order_cogs += (item_cost * qty)
-                    p_name = item['title']
-                    product_sales[p_name] = product_sales.get(p_name, 0) + (price * qty)
+                rev = float(o['total_price'])
+                cogs = 0
+                for i in o.get('line_items', []):
+                    vid = i.get('variant_id')
+                    price = float(i['price'])
+                    qty = i['quantity']
+                    cost = real_costs.get(vid, price * (1 - fallback_margin))
+                    cogs += (cost * qty)
+                    prod_sales[i['title']] = prod_sales.get(i['title'], 0) + (price * qty)
+                
+                daily_map[date]['sales'] += rev
+                daily_map[date]['cogs'] += cogs
+                total_rev += rev
+                total_cogs += cogs
 
-                daily_map[date]['sales'] += order_rev
-                daily_map[date]['cogs'] += order_cogs
-                total_revenue += order_rev
-                total_cogs += order_cogs
-
-            daily_list = [{'date': k, 'sales': v['sales'], 'cogs': v['cogs']} for k, v in daily_map.items()]
-            df_daily = pd.DataFrame(daily_list)
+            df_daily = pd.DataFrame([{'date': k, 'sales': v['sales'], 'cogs': v['cogs']} for k, v in daily_map.items()])
             if not df_daily.empty:
                 df_daily['date'] = pd.to_datetime(df_daily['date'])
                 df_daily = df_daily.sort_values('date')
-            
-            sorted_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:5]
-            
+                
             return {
                 "daily_df": df_daily,
-                "total_sales": total_revenue,
+                "total_sales": total_rev,
                 "total_cogs": total_cogs,
-                "top_products": sorted_products,
-                "aov": total_revenue / len(orders) if len(orders) > 0 else 0
+                "top_products": sorted(prod_sales.items(), key=lambda x: x[1], reverse=True)[:5],
+                "aov": total_rev / len(orders) if len(orders) > 0 else 0
             }, None
-        else: return None, f"Shopify Error {res.status_code}: {res.text}"
+        else: return None, f"Shopify Error {res.status_code}"
     except Exception as e: return None, f"Shopify Crash: {e}"
+
+def get_creative_images(token, creative_ids):
+    """Batched fetch of ad images"""
+    if not creative_ids: return {}
+    url_map = {}
+    try:
+        # Request fields
+        ids_str = ",".join(creative_ids[:50]) # Limit to 50 for safety
+        url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=thumbnail_url,image_url,name&access_token={token}"
+        res = requests.get(url)
+        if res.status_code == 200:
+            data = res.json()
+            for cid, val in data.items():
+                # Prefer thumbnail, fallback to image_url
+                url_map[cid] = val.get('thumbnail_url') or val.get('image_url')
+    except Exception: pass
+    return url_map
 
 def fetch_meta_data(token, account_id, start_date, end_date):
     try:
         base_url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
         time_range = json.dumps({'since': start_date.strftime('%Y-%m-%d'), 'until': end_date.strftime('%Y-%m-%d')})
         
-        cmp_params = {
-            'access_token': token, 'time_range': time_range, 'level': 'campaign',
-            'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc', 'limit': 100
-        }
+        # 1. Campaign Level
+        cmp_params = {'access_token': token, 'time_range': time_range, 'level': 'campaign', 'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc', 'limit': 100}
         cmp_res = requests.get(base_url, params=cmp_params)
         
-        daily_params = {
-            'access_token': token, 'time_range': time_range, 'level': 'account',
-            'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100
-        }
+        # 2. Daily Spend
+        daily_params = {'access_token': token, 'time_range': time_range, 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100}
         daily_res = requests.get(base_url, params=daily_params)
         
-        # Ad Level (For AI Context)
-        ad_start = (end_date - timedelta(days=7)).strftime('%Y-%m-%d')
-        # Ensure ad start doesn't exceed bounds if range is short
-        if start_date > datetime.strptime(ad_start, '%Y-%m-%d').date():
-            ad_start = start_date.strftime('%Y-%m-%d')
-            
-        ad_range = json.dumps({'since': ad_start, 'until': end_date.strftime('%Y-%m-%d')})
-        ad_params = {
-            'access_token': token, 'time_range': ad_range, 'level': 'ad',
-            'fields': 'ad_name,spend,ctr,cpm,action_values', 'limit': 20
-        }
+        # 3. Ad Level (For Gallery & Context)
+        ad_params = {'access_token': token, 'time_range': time_range, 'level': 'ad', 'fields': 'ad_name,creative{id},spend,ctr,cpm,action_values', 'limit': 20, 'sort': ['spend_descending']}
         ad_res = requests.get(base_url, params=ad_params)
 
         if cmp_res.status_code == 200 and daily_res.status_code == 200:
@@ -164,16 +160,13 @@ def fetch_meta_data(token, account_id, start_date, end_date):
             daily_data = daily_res.json().get('data', [])
             ad_data = ad_res.json().get('data', [])
             
-            daily_spend_map = {}
-            total_spend = 0
-            for d in daily_data:
-                daily_spend_map[d['date_start']] = float(d['spend'])
-                total_spend += float(d['spend'])
-                
-            df_daily_spend = pd.DataFrame(list(daily_spend_map.items()), columns=['date', 'spend'])
-            if not df_daily_spend.empty:
-                df_daily_spend['date'] = pd.to_datetime(df_daily_spend['date'])
+            # Process Daily
+            daily_spend = [{'date': d['date_start'], 'spend': float(d['spend'])} for d in daily_data]
+            df_daily_spend = pd.DataFrame(daily_spend)
+            if not df_daily_spend.empty: df_daily_spend['date'] = pd.to_datetime(df_daily_spend['date'])
+            total_spend = sum([d['spend'] for d in daily_spend])
 
+            # Process Campaigns
             campaigns = []
             for c in cmp_data:
                 spend = float(c.get('spend', 0))
@@ -181,20 +174,37 @@ def fetch_meta_data(token, account_id, start_date, end_date):
                 sales_val = sum([float(a['value']) for a in actions if a['action_type'] == 'purchase']) if actions else 0
                 campaigns.append({"Campaign": c.get('campaign_name'), "Spend": spend, "Sales": sales_val, "ROAS": round(sales_val/spend, 2) if spend>0 else 0, "CTR": float(c.get('ctr', 0))})
             
-            top_ads = []
+            # Process Ad Gallery
+            gallery_ads = []
+            creative_ids = []
+            
             for a in ad_data:
                 spend = float(a.get('spend', 0))
                 if spend > 0:
                     actions = a.get('action_values', [])
                     sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
-                    roas = round(sales_val/spend, 2)
-                    top_ads.append(f"{a['ad_name']} | Spend:${spend:.0f} | ROAS:{roas}x | CTR:{a.get('ctr')}%")
+                    cid = a.get('creative', {}).get('id')
+                    if cid: creative_ids.append(cid)
+                    
+                    gallery_ads.append({
+                        "name": a['ad_name'],
+                        "spend": spend,
+                        "roas": round(sales_val/spend, 2) if spend>0 else 0,
+                        "ctr": float(a.get('ctr', 0)),
+                        "cpm": float(a.get('cpm', 0)),
+                        "creative_id": cid
+                    })
+            
+            # Fetch Images
+            image_map = get_creative_images(token, creative_ids)
+            for ad in gallery_ads:
+                ad['image_url'] = image_map.get(ad['creative_id'])
 
             return {
                 "campaign_df": pd.DataFrame(campaigns),
                 "daily_spend_df": df_daily_spend,
                 "total_spend": total_spend,
-                "top_ads_list": top_ads
+                "gallery_ads": gallery_ads # List of dicts
             }, None
         else: return None, f"Meta Error: {daily_res.text}"
     except Exception as e: return None, f"Meta Crash: {e}"
@@ -204,47 +214,30 @@ if 'messages' not in st.session_state: st.session_state.messages = load_memory()
 if 'logs' not in st.session_state: st.session_state.logs = []
 if 'last_synced_dates' not in st.session_state: st.session_state.last_synced_dates = None
 
-# --- 5. SIDEBAR SETTINGS ---
+# --- 5. SIDEBAR ---
 with st.sidebar:
     st.markdown("### ⚙️ Settings")
     
-    # --- DATE PRESETS ---
-    preset = st.selectbox(
-        "Date Range",
-        ["Last 7 Days", "Last 30 Days", "This Month", "Last Month", "Custom"],
-        index=1
-    )
-    
+    preset = st.selectbox("Date Range", ["Last 7 Days", "Last 30 Days", "This Month", "Last Month", "Custom"], index=1)
     today = datetime.now().date()
-    start_d, end_d = today, today # Defaults
-    
-    if preset == "Last 7 Days":
-        start_d = today - timedelta(days=7)
-        end_d = today
-    elif preset == "Last 30 Days":
-        start_d = today - timedelta(days=30)
-        end_d = today
-    elif preset == "This Month":
-        start_d = today.replace(day=1)
-        end_d = today
-    elif preset == "Last Month":
+    if preset == "Last 7 Days": s_d, e_d = today - timedelta(days=7), today
+    elif preset == "Last 30 Days": s_d, e_d = today - timedelta(days=30), today
+    elif preset == "This Month": s_d, e_d = today.replace(day=1), today
+    elif preset == "Last Month": 
         first = today.replace(day=1)
-        end_d = first - timedelta(days=1)
-        start_d = end_d.replace(day=1)
-    else: # Custom
+        e_d = first - timedelta(days=1)
+        s_d = e_d.replace(day=1)
+    else: 
         cols = st.columns(2)
-        start_d = cols[0].date_input("Start", value=today - timedelta(days=30))
-        end_d = cols[1].date_input("End", value=today)
+        s_d = cols[0].date_input("Start", value=today - timedelta(days=30))
+        e_d = cols[1].date_input("End", value=today)
 
-    # UI CONTROLS
     st.divider()
     chat_width_pct = st.slider("Chat Width", 20, 60, 35, 5, format="%d%%")
     font_size = st.slider("Text Size", 12, 24, 14, 1, format="%dpx")
     margin_pct = st.slider("Margin % (Fallback)", 10, 90, 60, 5, format="%d%%") / 100.0
     st.divider()
 
-    # --- AUTO-SYNC LOGIC ---
-    # Define a sync function we can call automatically
     def run_sync():
         with st.spinner("Syncing..."):
             st.session_state.logs = [] 
@@ -252,16 +245,14 @@ with st.sidebar:
                 s_domain, s_token = st.secrets["SHOPIFY_DOMAIN"], st.secrets["SHOPIFY_TOKEN"]
                 m_token, m_id = st.secrets["META_TOKEN"], st.secrets["META_ACCOUNT_ID"]
                 
-                shop_data, s_err = fetch_shopify_data(s_domain, s_token, margin_pct, start_d, end_d)
-                meta_data, m_err = fetch_meta_data(m_token, m_id, start_d, end_d)
+                shop_data, s_err = fetch_shopify_data(s_domain, s_token, margin_pct, s_d, e_d)
+                meta_data, m_err = fetch_meta_data(m_token, m_id, s_d, e_d)
                 
                 if s_err: st.session_state.logs.append(s_err)
                 if m_err: st.session_state.logs.append(m_err)
 
                 if shop_data and meta_data:
-                    df_s = shop_data['daily_df']
-                    df_m = meta_data['daily_spend_df']
-                    
+                    df_s, df_m = shop_data['daily_df'], meta_data['daily_spend_df']
                     if not df_s.empty and not df_m.empty:
                         df_merged = pd.merge(df_s, df_m, on='date', how='outer').fillna(0)
                         df_merged['gross_profit'] = df_merged['sales'] - df_merged['cogs']
@@ -273,63 +264,36 @@ with st.sidebar:
                         total_net_profit = 0
 
                     st.session_state['context'] = {
-                        "shopify": shop_data,
-                        "meta": meta_data,
-                        "profit_df": df_merged,
-                        "total_net_profit": total_net_profit,
-                        "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0,
-                        "date_range": f"{start_d} to {end_d}"
+                        "shopify": shop_data, "meta": meta_data, "profit_df": df_merged,
+                        "total_net_profit": total_net_profit, "date_range": f"{s_d} to {e_d}",
+                        "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
                     }
-                    st.session_state.last_synced_dates = (start_d, end_d)
+                    st.session_state.last_synced_dates = (s_d, e_d)
                     if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
                 else: st.toast("Sync Failed", icon="⚠️")
             except Exception as e: st.session_state.logs.append(f"Config Error: {e}")
 
-    # TRIGGER SYNC IF DATES CHANGED
-    current_dates = (start_d, end_d)
-    if st.session_state.last_synced_dates != current_dates:
-        run_sync()
-
-    # MANUAL SYNC BUTTON (Optional force refresh)
-    if st.button("🔄 Force Sync", type="secondary", use_container_width=True):
-        run_sync()
-
+    if st.session_state.last_synced_dates != (s_d, e_d): run_sync()
+    if st.button("🔄 Force Sync", type="secondary", use_container_width=True): run_sync()
     if st.session_state.logs:
         with st.expander(f"⚠️ Logs ({len(st.session_state.logs)})"):
             for err in st.session_state.logs: st.error(err)
-            
     st.divider()
     if st.button("Clear Memory", type="secondary", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
-# --- 6. CSS ---
+# --- 6. CSS (GALLERY CARDS) ---
 st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
-    html, body, [class*="css"] {{
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-        background-color: #000000;
-        color: #ffffff;
-        height: 100vh;
-        overflow: hidden !important; 
-    }}
-    
+    html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; background-color: #000; color: #fff; height: 100vh; overflow: hidden !important; }}
     header[data-testid="stHeader"] {{ background-color: transparent !important; z-index: 999; }}
     .stApp > header {{ background-color: transparent; }}
-    
     .block-container {{ max-width: 100%; padding: 4rem 1rem 0 1rem; height: 100vh; overflow: hidden !important; }}
-    
     div[data-testid="column"] {{ height: 90vh; overflow-y: auto; overflow-x: hidden; display: block; }}
     div[data-testid="column"]:nth-of-type(2) > div {{ padding-bottom: 150px !important; }}
-
-    [data-testid="stChatInput"] {{
-        position: fixed !important; bottom: 0 !important; right: 1.5rem !important; left: auto !important;
-        width: {chat_width_pct-2}% !important; min-width: 300px;
-        background-color: #111111 !important; z-index: 9999 !important;
-        border-top: 1px solid #333; padding-top: 15px !important; padding-bottom: 25px !important;
-    }}
-    
+    [data-testid="stChatInput"] {{ position: fixed !important; bottom: 0 !important; right: 1.5rem !important; left: auto !important; width: {chat_width_pct-2}% !important; min-width: 300px; background-color: #111 !important; z-index: 9999 !important; border-top: 1px solid #333; padding-top: 15px !important; padding-bottom: 25px !important; }}
     .chat-bubble, .chat-bubble * {{ font-size: {font_size}px !important; line-height: 1.5; }}
     .chat-bubble {{ padding: 12px 16px; border-radius: 18px; max-width: 85%; position: relative; word-wrap: break-word; margin-bottom: 4px; display: inline-block; }}
     .user-bubble {{ background-color: #0A84FF; color: white; border-bottom-right-radius: 2px; }}
@@ -338,6 +302,28 @@ st.markdown(f"""
     .user-row {{ justify-content: flex-end; }}
     .bot-row {{ justify-content: flex-start; }}
     div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
+    
+    /* --- GALLERY CARD STYLING --- */
+    .ad-card {{
+        background-color: #111;
+        border: 1px solid #222;
+        border-radius: 12px;
+        overflow: hidden;
+        margin-bottom: 20px;
+        transition: transform 0.2s;
+    }}
+    .ad-card:hover {{ border-color: #444; transform: translateY(-2px); }}
+    .ad-image {{
+        width: 100%;
+        height: 180px;
+        object-fit: cover;
+        border-bottom: 1px solid #222;
+    }}
+    .ad-content {{ padding: 12px; }}
+    .ad-title {{ font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
+    .ad-metrics {{ display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #888; }}
+    .roas-badge {{ background-color: rgba(0, 200, 83, 0.2); color: #00E676; padding: 2px 6px; border-radius: 4px; font-weight: 600; }}
+    .spend-text {{ color: #ccc; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -352,30 +338,53 @@ with dash_col:
         st.markdown("## Overview")
         if 'context' in st.session_state:
             ctx = st.session_state['context']
-            s_data = ctx['shopify']
-            m_data = ctx['meta']
+            s_data, m_data = ctx['shopify'], ctx['meta']
             
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
             c2.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
             c3.metric("ROAS", f"{ctx['roas']:.2f}x")
-            
-            margin_source = "Real COGS" if s_data['total_cogs'] > 0 else f"Est. {margin_pct*100}%"
-            c4.metric("COGS Source", margin_source)
-
+            c4.metric("COGS Source", "Real COGS" if s_data['total_cogs'] > 0 else f"Est. {margin_pct*100}%")
             st.markdown("---")
             
-            st.subheader("Daily Net Profit")
-            df = ctx['profit_df']
-            if not df.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Bar(x=df['date'], y=df['net_profit'], name='Net Profit', marker_color=df['net_profit'].apply(lambda x: '#00C853' if x >= 0 else '#FF3D00')))
-                fig.add_trace(go.Scatter(x=df['date'], y=df['spend'], name='Ad Spend', line=dict(color='#888888', width=2, dash='dot')))
-                fig.update_layout(template="plotly_dark", height=350, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', hovermode="x unified", legend=dict(orientation="h", y=1.1))
-                st.plotly_chart(fig, use_container_width=True)
+            # --- TABS FOR VIEWS ---
+            tab1, tab2, tab3 = st.tabs(["Profit Chart", "Creative Gallery", "Campaigns"])
+            
+            with tab1:
+                df = ctx['profit_df']
+                if not df.empty:
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(x=df['date'], y=df['net_profit'], name='Net Profit', marker_color=df['net_profit'].apply(lambda x: '#00C853' if x >= 0 else '#FF3D00')))
+                    fig.add_trace(go.Scatter(x=df['date'], y=df['spend'], name='Ad Spend', line=dict(color='#888888', width=2, dash='dot')))
+                    fig.update_layout(template="plotly_dark", height=350, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', hovermode="x unified", legend=dict(orientation="h", y=1.1))
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            with tab2:
+                # --- VISUAL CREATIVE GALLERY ---
+                ads = m_data['gallery_ads']
+                if ads:
+                    cols = st.columns(3) # 3 Column Grid
+                    for i, ad in enumerate(ads):
+                        with cols[i % 3]:
+                            img_src = ad.get('image_url') or "https://via.placeholder.com/300x200/222/888?text=No+Image"
+                            st.markdown(f"""
+                            <div class="ad-card">
+                                <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x200/222/888?text=Video/Error'">
+                                <div class="ad-content">
+                                    <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
+                                    <div class="ad-metrics">
+                                        <span class="spend-text">${ad['spend']:,.0f} spent</span>
+                                        <span class="roas-badge">{ad['roas']}x ROAS</span>
+                                    </div>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                else:
+                    st.info("No active ad creatives found for this period.")
 
-            st.subheader("Campaign Performance")
-            st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
+            with tab3:
+                st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
+            
             st.markdown("<br><br><br>", unsafe_allow_html=True)
         else:
             st.info("👈 Select Date Range to begin.")
@@ -390,29 +399,26 @@ with chat_col:
                 st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
         st.markdown("<br><br><br>", unsafe_allow_html=True)
 
-# --- CHAT INPUT ---
+# --- INPUT ---
 if prompt := st.chat_input("Ask about your data..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_memory("user", prompt)
-    
     try:
         client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
         context_str = ""
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
-            top_ads = "\n".join(m_data['top_ads_list'])
-            context_str = f"DATE RANGE: {ctx.get('date_range')}\nOVERVIEW:\n- Net Profit: ${ctx['total_net_profit']:,.2f}\n- Revenue: ${s_data['total_sales']}\n- COGS: ${s_data['total_cogs']}\n- Ad Spend: ${m_data['total_spend']}\n- ROAS: {ctx['roas']:.2f}x\n\nRECENT TOP ADS:\n{top_ads}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
+            ads_txt = "\n".join([f"{a['name']}: {a['roas']}x ROAS (${a['spend']} spend)" for a in m_data['gallery_ads'][:10]])
+            context_str = f"OVERVIEW:\nNet Profit: ${ctx['total_net_profit']}\nRevenue: ${s_data['total_sales']}\nAd Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\n\nTOP ADS:\n{ads_txt}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
         
         history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
-        final_prompt = f"You are a Senior Media Buyer. Use this data to answer:\n{context_str}"
+        final_prompt = f"You are a Senior Media Buyer. Use this data:\n{context_str}"
         stream = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": final_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history], stream=True)
         
         response_text = ""
         for chunk in stream:
-            if chunk.choices[0].delta.content:
-                response_text += chunk.choices[0].delta.content
-        
+            if chunk.choices[0].delta.content: response_text += chunk.choices[0].delta.content
         st.session_state.messages.append({"role": "assistant", "content": response_text})
         save_memory("assistant", response_text)
         st.rerun()
