@@ -79,7 +79,6 @@ if 'logs' not in st.session_state: st.session_state.logs = []
 with st.sidebar:
     st.markdown("### ⚙️ Settings")
     
-    # CONTROLS
     chat_width_pct = st.slider("Chat Width", 20, 50, 30, 5, format="%d%%")
     font_size = st.slider("Text Size", 12, 24, 14, 1, format="%dpx")
     
@@ -117,7 +116,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# --- 5. CSS ARCHITECTURE (THE FIX) ---
+# --- 5. FIXED CSS SCROLLING ARCHITECTURE ---
 st.markdown(f"""
 <style>
     /* GLOBAL RESET */
@@ -126,72 +125,76 @@ st.markdown(f"""
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         background-color: #000000;
         color: #ffffff;
+        height: 100vh; /* Force Full Height */
+        overflow: hidden !important; /* LOCK MAIN SCROLL */
     }}
     
-    /* 1. LOCK MAIN PAGE SCROLL */
-    /* This freezes the window so only the columns scroll */
-    .block-container {{
-        max-width: 100%;
-        padding-top: 1rem;
-        padding-bottom: 0rem;
-        padding-left: 1rem; 
-        padding-right: 1rem;
-        height: 100vh;
-        overflow: hidden !important; 
-    }}
     header[data-testid="stHeader"] {{ display: none; }}
 
-    /* 2. ENABLE INDEPENDENT COLUMN SCROLLING */
-    /* We target the specific div containers for the columns */
+    /* --- THE SCROLL FIX --- */
+    
+    /* 1. Force the Main Container to fill screen but NOT scroll itself */
+    .block-container {{
+        max-width: 100%;
+        padding: 1rem 1rem 0 1rem;
+        height: 100vh;
+        overflow: hidden !important;
+    }}
+    
+    /* 2. Target the Columns and force THEM to scroll */
     div[data-testid="column"] {{
-        height: 90vh;        /* Height of the viewable area */
-        overflow-y: auto;    /* Allow internal scrolling */
-        overflow-x: hidden;
-        display: block;      /* Ensure block display for scroll */
+        height: 94vh;           /* Take up almost full height */
+        overflow-y: auto;       /* Enable Vertical Scroll */
+        overflow-x: hidden;     /* Disable Horizontal Scroll */
+        display: block;
+        scrollbar-width: thin;  /* Firefox thin scrollbar */
+        scrollbar-color: #333 #000;
     }}
+    
+    /* Chrome/Safari Scrollbar Styling */
+    div[data-testid="column"]::-webkit-scrollbar {{ width: 6px; }}
+    div[data-testid="column"]::-webkit-scrollbar-track {{ background: #000; }}
+    div[data-testid="column"]::-webkit-scrollbar-thumb {{ background: #333; border-radius: 4px; }}
+    div[data-testid="column"]::-webkit-scrollbar-thumb:hover {{ background: #555; }}
 
-    /* Left Column (Dashboard) padding fix */
-    div[data-testid="column"]:nth-of-type(1) > div {{
-        padding-bottom: 50px; 
-    }}
-
-    /* Right Column (Chat) padding fix for Sticky Input */
+    /* Right Column (Chat) specific padding for sticky input */
     div[data-testid="column"]:nth-of-type(2) > div {{
-        padding-bottom: 150px; 
+        padding-bottom: 150px !important; /* Space for input box */
     }}
 
-    /* 3. STICKY INPUT POSITIONING */
+    /* --- STICKY INPUT POSITIONING --- */
     [data-testid="stChatInput"] {{
         position: fixed !important;
         bottom: 0 !important;
-        right: 1rem !important;
+        right: 1.5rem !important;
         left: auto !important;
-        width: {chat_width_pct}% !important;
+        width: {chat_width_pct-2}% !important; /* Slightly smaller to fit padding */
         min-width: 300px;
-        background-color: #0E0E0E !important; /* Slightly distinct bg */
+        background-color: #111111 !important;
         z-index: 9999 !important;
         border-top: 1px solid #333;
-        padding-bottom: 2rem !important;
-        padding-top: 1rem !important;
+        padding-top: 15px !important;
+        padding-bottom: 25px !important;
     }}
     
-    /* 4. CHAT BUBBLE TYPOGRAPHY */
-    .chat-bubble {{
+    /* --- TEXT SIZING FIX --- */
+    /* We apply the font size to the generic class AND specific classes with !important */
+    .chat-bubble, .user-bubble, .bot-bubble {{
+        font-size: {font_size}px !important; 
+        line-height: 1.5;
         padding: 10px 14px;
         border-radius: 16px;
         max-width: 85%;
-        font-size: {font_size}px !important; /* Dynamic Size Applied Here */
-        line-height: 1.5;
         position: relative;
         word-wrap: break-word;
     }}
 
-    /* UI Colors */
+    /* Colors */
     .user-bubble {{ background-color: #0A84FF; color: white; border-bottom-right-radius: 2px; }}
     .bot-bubble {{ background-color: #262626; color: #E5E5EA; border: 1px solid #333; border-bottom-left-radius: 2px; }}
-    div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
     
-    /* Layout Utilities */
+    /* Metrics */
+    div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
     .chat-row {{ display: flex; margin-bottom: 12px; width: 100%; }}
     .user-row {{ justify-content: flex-end; }}
     .bot-row {{ justify-content: flex-start; }}
@@ -245,16 +248,17 @@ with dash_col:
                 hide_index=True,
                 use_container_width=True
             )
+            # Extra spacer for scrolling
+            st.markdown("<br><br><br><br>", unsafe_allow_html=True)
     else:
         st.info("👈 Sync Data from the sidebar to begin.")
 
 # ------------------------------------------
-# 💬 RIGHT: CHAT CONSOLE
+# 💬 RIGHT: CHAT
 # ------------------------------------------
 with chat_col:
     st.markdown("### AI Strategist")
     
-    # Render Custom HTML Chat
     chat_html = ""
     for msg in st.session_state.messages:
         if msg["role"] == "user":
