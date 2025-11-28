@@ -17,7 +17,7 @@ st.set_page_config(
 # --- 2. APPLE UI DESIGN SYSTEM (CSS) ---
 st.markdown("""
 <style>
-    /* 1. Global Typography & Colors */
+    /* GLOBAL FONTS & COLORS */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
     
     html, body, [class*="css"] {
@@ -26,7 +26,7 @@ st.markdown("""
         color: #ffffff;
     }
 
-    /* 2. STICKY TABS */
+    /* STICKY TABS */
     .stTabs [data-baseweb="tab-list"] {
         position: sticky;
         top: 3rem;
@@ -37,57 +37,62 @@ st.markdown("""
         border-bottom: 1px solid #1C1C1E;
     }
 
-    /* 3. iMESSAGE STYLE CHAT (THE FIX) */
+    /* CUSTOM CHAT BUBBLES (The iMessage Fix) */
+    .chat-row {
+        display: flex;
+        margin-bottom: 20px;
+        width: 100%;
+    }
     
-    /* REMOVE DEFAULT BACKGROUNDS */
-    .stChatMessage {
-        background-color: transparent !important;
+    .user-row {
+        justify-content: flex-end; /* Align to Right */
+    }
+    
+    .bot-row {
+        justify-content: flex-start; /* Align to Left */
     }
 
-    /* USER MESSAGES (Right Side) */
-    /* We use :has() to detect the user avatar, ensuring alignment is always correct */
-    div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"]) {
-        flex-direction: row-reverse; /* Flips Avatar to the Right */
-        text-align: right;
-    }
-    
-    div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"]) div[data-testid="stChatMessageContent"] {
-        background-color: #007AFF !important; /* iOS Blue */
-        color: white !important;
-        border-radius: 20px 20px 4px 20px !important;
-        
-        /* THE STAGGERED LOOK FIX */
-        display: inline-block;  /* Allows box to shrink to text size */
-        max-width: 70%;         /* Prevents it from going full width */
-        margin-right: 10px;     /* Gap near avatar */
-        text-align: left;       /* Text inside bubble stays readable */
-        box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+    .chat-bubble {
+        padding: 15px 20px;
+        border-radius: 20px;
+        max-width: 70%; /* THE 70% WIDTH FIX */
+        font-size: 16px;
+        line-height: 1.5;
+        position: relative;
+        word-wrap: break-word;
     }
 
-    /* ASSISTANT MESSAGES (Left Side) */
-    div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-assistant"]) {
-        flex-direction: row; /* Standard alignment */
-        text-align: left;
+    /* User Bubble Style (Blue, Right) */
+    .user-bubble {
+        background-color: #007AFF;
+        color: white;
+        border-bottom-right-radius: 4px; /* Subtle 'speech' edge */
+        box-shadow: 0 2px 5px rgba(0,0,0,0.2);
     }
-    
-    div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-assistant"]) div[data-testid="stChatMessageContent"] {
-        background-color: #1C1C1E !important; /* iOS Dark Grey */
+
+    /* Bot Bubble Style (Grey, Left) */
+    .bot-bubble {
+        background-color: #1C1C1E; /* Dark Grey */
+        color: #E5E5EA;
         border: 1px solid #2C2C2E;
-        border-radius: 20px 20px 20px 4px !important;
-        
-        /* THE STAGGERED LOOK FIX */
-        display: inline-block;
-        max-width: 70%;
-        margin-left: 10px;
-        text-align: left;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        border-bottom-left-radius: 4px;
     }
+    
+    /* Avatar Icons */
+    .avatar {
+        width: 35px;
+        height: 35px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 10px;
+        font-size: 18px;
+    }
+    .user-avatar { background-color: #1C1C1E; order: 2; } /* Icon on right */
+    .bot-avatar { background-color: #2C2C2E; order: 0; }  /* Icon on left */
 
-    /* AVATAR COLORS */
-    div[data-testid="chatAvatarIcon-user"] { background-color: #2C2C2E !important; }
-    div[data-testid="chatAvatarIcon-assistant"] { background-color: #007AFF !important; }
-
-    /* 4. METRICS & CARDS */
+    /* METRICS & CARDS */
     div[data-testid="stMetric"] {
         background-color: #1C1C1E;
         border: 1px solid #2C2C2E;
@@ -95,7 +100,7 @@ st.markdown("""
         border-radius: 16px;
     }
     
-    /* 5. UI CLEANUP */
+    /* CLEANUP */
     header[data-testid="stHeader"] { background-color: transparent; }
     .block-container { padding-bottom: 150px; }
 
@@ -229,22 +234,44 @@ with tab1:
     else:
         st.info("Tap 'Sync Data' to initialize dashboard.")
 
-# CHAT TAB
+# CHAT TAB (REBUILT WITH CUSTOM HTML)
 with tab2:
     chat_container = st.container()
+    
+    # 1. RENDER CHAT HISTORY USING CUSTOM HTML
     with chat_container:
         for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+            if msg["role"] == "user":
+                # User: Right Aligned, Blue
+                st.markdown(f"""
+                <div class="chat-row user-row">
+                    <div class="chat-bubble user-bubble">{msg['content']}</div>
+                    <div class="avatar user-avatar">👤</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                # Assistant: Left Aligned, Grey
+                st.markdown(f"""
+                <div class="chat-row bot-row">
+                    <div class="avatar bot-avatar">🤖</div>
+                    <div class="chat-bubble bot-bubble">{msg['content']}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
+    # 2. CHAT INPUT
     if prompt := st.chat_input("Ask a question..."):
+        # Append to state
         st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"): st.markdown(prompt)
         save_memory("user", prompt)
+        
+        # We need to rerun immediately to show the user's message in the HTML loop above
+        # But we also need to generate the response. 
+        # Trick: We display the user message *visually* once here before the rerun happens later.
         
         try:
             client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
             
+            # Show "Thinking" Status
             with st.status("Thinking...", expanded=True) as status:
                 context_str = ""
                 if 'context' in st.session_state:
@@ -252,6 +279,7 @@ with tab2:
                     context_str = f"DATA:\nSales: {st.session_state['context']['total_sales']}\n\nCAMPAIGNS:\n{cmp_sum}"
                 status.update(label="Complete", state="complete", expanded=False)
             
+            # Generate AI Response
             history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
             final_prompt = f"You are an elite Media Buyer. Be concise, tactical, and data-driven.\n\n{context_str}"
             
@@ -260,9 +288,16 @@ with tab2:
                 messages=[{"role": "system", "content": final_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history],
                 stream=True
             )
-            with st.chat_message("assistant"): response = st.write_stream(stream)
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            save_memory("assistant", response)
+            
+            # Collect stream
+            response_text = ""
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    response_text += chunk.choices[0].delta.content
+            
+            # Save and Rerun
+            st.session_state.messages.append({"role": "assistant", "content": response_text})
+            save_memory("assistant", response_text)
             st.rerun()
             
         except Exception as e: st.error(f"Error: {e}")
