@@ -276,7 +276,7 @@ with st.sidebar:
                     df_s, df_m = shop_data['daily_df'], meta_data['daily_spend_df']
                     if not df_s.empty and not df_m.empty:
                         df_merged = pd.merge(df_s, df_m, on='date', how='outer').fillna(0)
-                        df_merged['gross_profit'] = df_merged['sales'] - df_merged['cogs']
+                        df_merged['gross_profit'] = df_merged['sales'] - df_merged['c cogs']
                         df_merged['net_profit'] = df_merged['gross_profit'] - df_merged['spend']
                         df_merged = df_merged.sort_values('date')
                         total_net_profit = df_merged['net_profit'].sum()
@@ -337,8 +337,6 @@ st.markdown(f"""
     .text-val {{ font-weight: 600; color: #eee; font-size: 12px; }}
     
     .context-tag {{ font-size: 10px; background: #222; padding: 2px 6px; border-radius: 4px; color: #888; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
-    .btn-view {{ display: block; width: 100%; text-align: center; background: #222; color: #ccc; font-size: 11px; padding: 6px 0; border-radius: 6px; margin-top: 8px; transition: background 0.2s; }}
-    .btn-view:hover {{ background: #333; color: white; }}
     a {{ text-decoration: none; color: inherit; }}
 </style>
 """, unsafe_allow_html=True)
@@ -393,35 +391,32 @@ with dash_col:
                             
                             link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
                             
+                            # FIXED INDENTATION HERE
                             st.markdown(f"""
-                            <a href="{link}" target="_blank">
-                                <div class="ad-card">
-                                    <div class="ad-image-container">
-                                        <div class="ad-bg" style="background-image: url('{img_src}');"></div>
-                                        <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
-                                        <div class="ad-link-icon">↗</div>
-                                        <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
-                                    </div>
-                                    <div class="ad-footer">
-                                        <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
-                                        <div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div>
-                                        
-                                        <div class="grid-stats">
-                                            <div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div>
-                                            <div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div>
-                                            
-                                            <div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div>
-                                            <div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div>
-                                            
-                                            <div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div>
-                                            <div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div>
-                                        </div>
-                                        
-                                        <div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div>
-                                    </div>
-                                </div>
-                            </a>
-                            """, unsafe_allow_html=True)
+<a href="{link}" target="_blank">
+    <div class="ad-card">
+        <div class="ad-image-container">
+            <div class="ad-bg" style="background-image: url('{img_src}');"></div>
+            <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
+            <div class="ad-link-icon">↗</div>
+            <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
+        </div>
+        <div class="ad-footer">
+            <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
+            <div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div>
+            <div class="grid-stats">
+                <div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div>
+                <div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div>
+                <div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div>
+                <div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div>
+                <div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div>
+                <div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div>
+            </div>
+            <div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div>
+        </div>
+    </div>
+</a>
+""", unsafe_allow_html=True)
                 else: st.info("No active creatives found in this date range.")
 
             with tab3:
