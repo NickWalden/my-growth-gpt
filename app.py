@@ -110,36 +110,36 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
         else: return None, f"Shopify Error {res.status_code}"
     except Exception as e: return None, f"Shopify Crash: {e}"
 
-def get_creative_images(token, creative_ids):
+def fetch_ad_creatives_batch(token, ad_ids):
     """
-    Robust Image Fetcher using Batch IDs.
-    Handles Static Images, Videos, and DCO (Dynamic Creative).
+    Step 2: Fetch Creative Data using the Ad IDs we found in Step 1.
     """
-    if not creative_ids: return {}
-    url_map = {}
+    if not ad_ids: return {}
+    creative_map = {}
     
-    # Chunking to groups of 50 to respect API limits
-    chunks = [creative_ids[i:i + 50] for i in range(0, len(creative_ids), 50)]
+    # Chunking
+    chunks = [ad_ids[i:i + 50] for i in range(0, len(ad_ids), 50)]
     
     for chunk in chunks:
         try:
             ids_str = ",".join(chunk)
-            # We ask for ALL possible image sources
-            url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=thumbnail_url,image_url,object_story_spec,asset_feed_spec&access_token={token}"
+            # We query the AD object directly to get its creative details
+            url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=creative{{thumbnail_url,image_url,object_story_spec,asset_feed_spec}}&access_token={token}"
             res = requests.get(url)
             
             if res.status_code == 200:
                 data = res.json()
-                for cid, val in data.items():
+                for ad_id, val in data.items():
+                    creative = val.get('creative', {})
                     img = None
                     
                     # 1. Direct Image
-                    img = val.get('image_url') or val.get('thumbnail_url')
+                    img = creative.get('image_url') or creative.get('thumbnail_url')
                     
                     # 2. Object Story (Posts/Videos)
                     if not img:
                         try:
-                            spec = val.get('object_story_spec', {})
+                            spec = creative.get('object_story_spec', {})
                             img = spec.get('link_data', {}).get('picture') or \
                                   spec.get('photo_data', {}).get('image_url') or \
                                   spec.get('video_data', {}).get('image_url')
@@ -148,50 +148,46 @@ def get_creative_images(token, creative_ids):
                     # 3. Dynamic Creative (DCO)
                     if not img:
                         try:
-                            # DCO stores images in a list called asset_feed_spec
-                            images = val.get('asset_feed_spec', {}).get('images', [])
+                            images = creative.get('asset_feed_spec', {}).get('images', [])
                             if images: img = images[0].get('url')
                         except: pass
                     
                     if img:
-                        url_map[cid] = img
+                        creative_map[ad_id] = img
         except Exception: pass
         
-    return url_map
+    return creative_map
 
 def fetch_meta_data(token, account_id, start_date, end_date):
     try:
         base_url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
         time_range = json.dumps({'since': start_date.strftime('%Y-%m-%d'), 'until': end_date.strftime('%Y-%m-%d')})
         
-        # 1. Campaign Request
-        cmp_params = {
-            'access_token': token, 'time_range': time_range, 'level': 'campaign',
-            'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc', 'limit': 100
-        }
+        # 1. Campaign Level
+        cmp_params = {'access_token': token, 'time_range': time_range, 'level': 'campaign', 'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc', 'limit': 100}
         cmp_res = requests.get(base_url, params=cmp_params)
         
-        # 2. Daily Spend Request
-        daily_params = {
-            'access_token': token, 'time_range': time_range, 'level': 'account',
-            'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100
-        }
+        # 2. Daily Spend
+        daily_params = {'access_token': token, 'time_range': time_range, 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100}
         daily_res = requests.get(base_url, params=daily_params)
         
-        # 3. Ad Level Request (Get IDs only)
+        # 3. Ad Insights (Performance Only - Step 1)
+        # We request 'ad_id' here so we can look up the creative later
         ad_params = {
-            'access_token': token, 'time_range': time_range, 'level': 'ad',
-            'fields': 'ad_name,creative{id},spend,ctr,cpm,action_values', 
-            'limit': 50, 'sort': ['spend_descending']
+            'access_token': token, 
+            'time_range': time_range, 
+            'level': 'ad',
+            'fields': 'ad_id,ad_name,spend,ctr,cpm,action_values', 
+            'limit': 50, 
+            'sort': ['spend_descending']
         }
         ad_res = requests.get(base_url, params=ad_params)
 
-        # ERROR CHECKING (The Fix)
+        # ERROR CHECKING
         if cmp_res.status_code != 200: return None, f"Meta Campaign Error: {cmp_res.text}"
         if daily_res.status_code != 200: return None, f"Meta Daily Error: {daily_res.text}"
         if ad_res.status_code != 200: return None, f"Meta Ad Error: {ad_res.text}"
 
-        # If we got here, all 3 requests worked
         cmp_data = cmp_res.json().get('data', [])
         daily_data = daily_res.json().get('data', [])
         ad_data = ad_res.json().get('data', [])
@@ -210,32 +206,35 @@ def fetch_meta_data(token, account_id, start_date, end_date):
             sales_val = sum([float(a['value']) for a in actions if a['action_type'] == 'purchase']) if actions else 0
             campaigns.append({"Campaign": c.get('campaign_name'), "Spend": spend, "Sales": sales_val, "ROAS": round(sales_val/spend, 2) if spend>0 else 0, "CTR": float(c.get('ctr', 0))})
         
-        # Process Gallery (Step 1: Collect Data)
+        # Process Gallery (Step 2: Collect IDs)
         gallery_ads = []
-        creative_ids = []
+        ad_ids_to_fetch = []
+        
         for a in ad_data:
             spend = float(a.get('spend', 0))
-            # Lower threshold to ensure we get results even if spend is low today
+            # Lower threshold
             if spend > 0 or int(a.get('impressions', 0)) > 10:
                 actions = a.get('action_values', [])
                 sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
-                cid = a.get('creative', {}).get('id')
                 
-                if cid: 
-                    creative_ids.append(cid)
+                # Note: The insights endpoint calls it 'ad_id', but sometimes just 'id'.
+                # We use 'ad_id' because we requested it specifically in fields.
+                ad_id = a.get('ad_id') or a.get('id')
+                
+                if ad_id:
+                    ad_ids_to_fetch.append(ad_id)
                     gallery_ads.append({
+                        "id": ad_id, # Keep ID for matching
                         "name": a['ad_name'], "spend": spend, 
                         "roas": round(sales_val/spend, 2) if spend>0 else 0,
-                        "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0)), 
-                        "creative_id": cid
+                        "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0))
                     })
         
-        # Process Gallery (Step 2: Batch Fetch Images)
-        # We only call this if we found creative IDs
-        if creative_ids:
-            image_map = get_creative_images(token, list(set(creative_ids))) # Deduplicate IDs
+        # Step 3: Fetch Creative Images using Ad IDs
+        if ad_ids_to_fetch:
+            image_map = fetch_ad_creatives_batch(token, ad_ids_to_fetch)
             for ad in gallery_ads:
-                ad['image_url'] = image_map.get(ad['creative_id'])
+                ad['image_url'] = image_map.get(ad['id'])
 
         return {
             "campaign_df": pd.DataFrame(campaigns), "daily_spend_df": df_daily_spend,
