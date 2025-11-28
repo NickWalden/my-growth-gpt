@@ -40,11 +40,10 @@ def get_product_costs(domain, token, variant_ids):
     if not variant_ids: return {}
     cost_map = {}
     try:
-        # Deduplicate IDs to save API calls
+        # Deduplicate
         unique_ids = list(set(variant_ids))
         chunks = [unique_ids[i:i + 50] for i in range(0, len(unique_ids), 50)]
         headers = {"X-Shopify-Access-Token": token}
-        
         for chunk in chunks:
             ids_str = ",".join(map(str, chunk))
             url = f"https://{domain}/admin/api/2023-10/variants.json?ids={ids_str}&fields=id,inventory_item_id"
@@ -53,7 +52,6 @@ def get_product_costs(domain, token, variant_ids):
                 vars = res.json().get('variants', [])
                 inv_ids = [v['inventory_item_id'] for v in vars]
                 var_map = {v['inventory_item_id']: v['id'] for v in vars}
-                
                 if inv_ids:
                     inv_str = ",".join(map(str, inv_ids))
                     url2 = f"https://{domain}/admin/api/2023-10/inventory_items.json?ids={inv_str}&fields=id,cost"
@@ -71,48 +69,41 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
         start_iso = start_date.strftime('%Y-%m-%dT00:00:00')
         end_iso = end_date.strftime('%Y-%m-%dT23:59:59')
         
-        # Base URL for first page
-        url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&created_at_min={start_iso}&created_at_max={end_iso}&limit=250&fields=id,created_at,total_price,line_items,customer"
+        # UPGRADE: REMOVED "&fields=..." to ensure we get the full customer object including orders_count
+        url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&created_at_min={start_iso}&created_at_max={end_iso}&limit=250"
         headers = {"X-Shopify-Access-Token": token}
         
         all_orders = []
         
-        # --- PAGINATION LOOP (THE FIX) ---
+        # Pagination Loop
         while url:
             res = requests.get(url, headers=headers)
-            if res.status_code != 200:
-                return None, f"Shopify Error {res.status_code}: {res.text}"
+            if res.status_code != 200: return None, f"Shopify Error {res.status_code}: {res.text}"
             
             data = res.json()
             orders = data.get('orders', [])
             all_orders.extend(orders)
             
-            # Check for 'Link' header to get next page
-            # Shopify returns a header like: <url>; rel="next", <url>; rel="previous"
+            # Check Link header for next page
             link_header = res.headers.get('Link')
-            url = None # Reset URL to stop loop unless we find a 'next' link
-            
+            url = None
             if link_header:
                 links = link_header.split(',')
                 for link in links:
                     if 'rel="next"' in link:
                         url = link.split(';')[0].strip('<> ')
-        
-        # ---------------------------------
 
-        # Now process ALL orders
+        # Process Costs
         all_vids = set()
         for o in all_orders:
             for i in o.get('line_items', []):
                 if i.get('variant_id'): all_vids.add(i['variant_id'])
-        
         real_costs = get_product_costs(domain, token, list(all_vids))
         
         daily_map = {}
         prod_sales = {}
         total_rev = 0
         total_cogs = 0
-        
         new_cust_rev = 0
         ret_cust_rev = 0
         new_orders = 0
@@ -124,14 +115,15 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
             
             rev = float(o['total_price'])
             
-            # --- CUSTOMER SEGMENTATION ---
+            # --- NEW vs RETURNING LOGIC ---
             is_new = True
             customer = o.get('customer')
+            
+            # If customer exists, check orders_count
             if customer:
-                # orders_count includes the current order.
-                # 1 = First time buyer. > 1 = Returning.
-                cnt = customer.get('orders_count')
-                if cnt is not None and int(cnt) > 1:
+                # 'orders_count' includes the current order. So 1 = New, >1 = Returning
+                count = customer.get('orders_count')
+                if count and int(count) > 1:
                     is_new = False
             
             if is_new:
@@ -141,20 +133,14 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
             else:
                 ret_cust_rev += rev
                 daily_map[date]['ret_sales'] += rev
-            
-            # -----------------------------
+            # ------------------------------
 
             cogs = 0
             for i in o.get('line_items', []):
                 vid = i.get('variant_id')
                 price = float(i['price'])
                 qty = i['quantity']
-                # Cost logic
-                if vid in real_costs and real_costs[vid] > 0:
-                    cost = real_costs[vid]
-                else:
-                    cost = price * (1 - fallback_margin)
-                    
+                cost = real_costs.get(vid, price * (1 - fallback_margin))
                 cogs += (cost * qty)
                 prod_sales[i['title']] = prod_sales.get(i['title'], 0) + (price * qty)
             
@@ -174,17 +160,12 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
             df_daily = df_daily.sort_values('date')
             
         return {
-            "daily_df": df_daily, 
-            "total_sales": total_rev, 
-            "total_cogs": total_cogs,
-            "new_cust_rev": new_cust_rev,
-            "ret_cust_rev": ret_cust_rev,
-            "new_orders": new_orders,
+            "daily_df": df_daily, "total_sales": total_rev, "total_cogs": total_cogs,
+            "new_cust_rev": new_cust_rev, "ret_cust_rev": ret_cust_rev, "new_orders": new_orders,
             "top_products": sorted(prod_sales.items(), key=lambda x: x[1], reverse=True)[:5],
             "aov": total_rev / len(all_orders) if len(all_orders) > 0 else 0,
             "order_count": len(all_orders)
         }, None
-
     except Exception as e: return None, f"Shopify Crash: {e}"
 
 def fetch_ad_creatives_batch(token, ad_ids):
@@ -352,8 +333,10 @@ def run_sync_logic():
                     df_merged = df_merged.sort_values('date')
                     total_net_profit = df_merged['net_profit'].sum()
                 else: df_merged = pd.DataFrame(); total_net_profit = 0
+                
                 blended_mer = shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
                 ncpa = meta_data['total_spend'] / shop_data['new_orders'] if shop_data['new_orders'] > 0 else 0
+
                 st.session_state['context'] = {
                     "shopify": shop_data, "meta": meta_data, "profit_df": df_merged,
                     "total_net_profit": total_net_profit, "date_range": f"{s_d} to {e_d}",
@@ -430,10 +413,10 @@ with dash_col:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
             
-            # --- 6 COLUMNS METRICS ---
+            # --- 6 COLUMNS METRICS (UPDATED) ---
             c1, c2, c3, c4, c5, c6 = st.columns(6)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
-            c2.metric("Orders", f"{s_data['order_count']:,}")
+            c2.metric("Orders", f"{s_data['order_count']:,}") # RESTORED
             c3.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
             c4.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
             c5.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
