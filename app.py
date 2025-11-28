@@ -10,7 +10,7 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(
     page_title="Growth OS",
     page_icon="",
-    layout="wide",
+    layout="wide", # We keep wide layout but constrain it with CSS below
     initial_sidebar_state="expanded"
 )
 
@@ -26,6 +26,14 @@ st.markdown("""
         color: #ffffff;
     }
 
+    /* --- THE "GREEN BOX" FIX: CENTER & LIMIT WIDTH --- */
+    .block-container {
+        max-width: 950px !important; /* Limits the width of the whole app */
+        margin: 0 auto !important;   /* Centers the app */
+        padding-bottom: 140px !important; /* Space for the input box */
+        padding-top: 2rem !important;
+    }
+
     /* STICKY TABS */
     .stTabs [data-baseweb="tab-list"] {
         position: sticky;
@@ -37,25 +45,20 @@ st.markdown("""
         border-bottom: 1px solid #1C1C1E;
     }
 
-    /* --- FIXED CHAT INPUT (THE FIX) --- */
+    /* --- STICKY CHAT INPUT (CENTERED MATCHING APP WIDTH) --- */
     [data-testid="stChatInput"] {
         position: fixed !important;
         bottom: 0 !important;
-        left: 0 !important;
-        right: 0 !important;
+        left: 50% !important;        /* Center Horizontally */
+        transform: translateX(-50%) !important; /* Perfect Center Alignment */
         width: 100% !important;
+        max-width: 950px !important; /* Matches the .block-container width */
         padding: 20px !important;
-        background-color: #000000 !important; /* Solid Black Background */
-        z-index: 99 !important; /* Above content, below sidebar */
-        border-top: 1px solid #1C1C1E; /* Subtle border */
+        background-color: #000000 !important;
+        z-index: 99 !important;
+        border-top: 1px solid #1C1C1E;
     }
     
-    /* Ensure the text box inside doesn't hit the edges on huge screens */
-    [data-testid="stChatInput"] > div {
-        max-width: 1000px;
-        margin: 0 auto;
-    }
-
     /* CUSTOM CHAT BUBBLES */
     .chat-row { display: flex; margin-bottom: 20px; width: 100%; }
     .user-row { justify-content: flex-end; }
@@ -64,7 +67,7 @@ st.markdown("""
     .chat-bubble {
         padding: 15px 20px;
         border-radius: 20px;
-        max-width: 70%;
+        max-width: 75%; /* Slightly wider text area inside the constrained app */
         font-size: 16px;
         line-height: 1.5;
         position: relative;
@@ -108,9 +111,6 @@ st.markdown("""
     
     /* CLEANUP */
     header[data-testid="stHeader"] { background-color: transparent; }
-    
-    /* PADDING AT BOTTOM SO LAST MESSAGE ISNT HIDDEN BEHIND INPUT */
-    .block-container { padding-bottom: 140px !important; }
 
 </style>
 """, unsafe_allow_html=True)
