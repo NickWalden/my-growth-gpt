@@ -23,16 +23,29 @@ def load_memory():
         conn = st.connection("gsheets", type=GSheetsConnection)
         df = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         if df.empty or "role" not in df.columns: return []
-        return df.to_dict("records")
+        records = df.to_dict("records")
+        # Parse suggestions if stored in the content string
+        for r in records:
+            if "|||" in str(r['content']):
+                parts = str(r['content']).split("|||")
+                r['content'] = parts[0]
+                try: r['suggestions'] = json.loads(parts[1])
+                except: r['suggestions'] = []
+        return records
     except Exception: return []
 
-def save_memory(role, content):
+# FIX: Added 'suggestions' argument to prevent crash
+def save_memory(role, content, suggestions=None):
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         try: existing_data = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         except Exception: existing_data = pd.DataFrame(columns=["timestamp", "role", "content"])
-        if isinstance(content, dict): content = json.dumps(content)
-        new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": content}])
+        
+        save_content = str(content)
+        if suggestions:
+            save_content = f"{save_content}|||{json.dumps(suggestions)}"
+            
+        new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": save_content}])
         updated_data = pd.concat([existing_data, new_row], ignore_index=True)
         conn.update(worksheet="ChatHistory", data=updated_data)
     except Exception: pass
@@ -145,7 +158,6 @@ def fetch_ad_creatives_batch(token, ad_ids):
     for chunk in chunks:
         try:
             ids_str = ",".join(chunk)
-            # REQUEST full_picture FROM LINK DATA (High Res)
             url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=creative{{image_url,thumbnail_url,object_story_spec,asset_feed_spec,effective_object_story_id,instagram_permalink_url}}&access_token={token}"
             res = requests.get(url); time.sleep(0.2)
             if res.status_code == 200:
@@ -153,29 +165,20 @@ def fetch_ad_creatives_batch(token, ad_ids):
                 for ad_id, val in data.items():
                     creative = val.get('creative', {})
                     img, link = None, None
-                    
-                    # 1. Try HD Image from Object Story
                     try:
                         spec = creative.get('object_story_spec', {})
                         img = spec.get('link_data', {}).get('full_picture') or spec.get('link_data', {}).get('picture')
                         if not img: img = spec.get('photo_data', {}).get('url')
                         if not img: img = spec.get('video_data', {}).get('image_url')
                     except: pass
-                    
-                    # 2. Try Dynamic Creative
                     if not img:
                         try: img = creative.get('asset_feed_spec', {}).get('images', [])[0].get('url')
                         except: pass
-                    
-                    # 3. Fallback to standard fields
                     if not img: img = creative.get('image_url') or creative.get('thumbnail_url')
-                    
-                    # Link Logic
                     link = creative.get('instagram_permalink_url')
                     if not link:
                         pid = creative.get('effective_object_story_id')
                         if pid: link = f"https://www.facebook.com/{pid}"
-                    
                     if img: image_map[ad_id] = {"img": img, "link": link}
         except Exception: pass
     return image_map
@@ -239,20 +242,53 @@ def fetch_meta_data(token, account_id, start_date, end_date):
 def generate_briefing(ctx, s_data, m_data):
     try:
         client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        
+        # Serialize data safely for JSON
+        # We convert any pandas timestamps or floats to standard types
+        def safe_json(obj):
+            if isinstance(obj, pd.Timestamp): return obj.isoformat()
+            if isinstance(obj, float): return round(obj, 2)
+            return str(obj)
+
         analysis_payload = {
-            "period": ctx.get('date_range'),
+            "period": str(ctx.get('date_range')),
             "metrics": {
-                "net_profit": ctx['total_net_profit'], "revenue": s_data['total_sales'], 
-                "ad_spend": m_data['total_spend'], "blended_roas": ctx['blended_mer'], 
-                "new_customers": s_data['new_orders'], "ncpa": ctx['ncpa'], "aov": s_data['aov']
+                "net_profit": float(ctx['total_net_profit']), 
+                "revenue": float(s_data['total_sales']), 
+                "ad_spend": float(m_data['total_spend']), 
+                "blended_roas": float(ctx['blended_mer']), 
+                "new_customers": int(s_data['new_orders']), 
+                "ncpa": float(ctx['ncpa'])
             },
-            "top_products": [p[0] for p in s_data['top_products']],
-            "campaigns": m_data['campaign_df'].to_dict('records')
+            "top_products": [str(p[0]) for p in s_data['top_products']],
+            "campaigns": m_data['campaign_df'].head(5).to_dict('records')
         }
-        system_prompt = """You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys: {"headline": "A short, punchy 1-sentence summary.", "wins": ["Bullet 1", "Bullet 2"], "warnings": ["Bullet 1", "Bullet 2"], "action_plan": "One clear strategic recommendation.", "suggested_questions": ["Question 1", "Question 2", "Question 3"]} Do not include markdown formatting. Return RAW JSON only."""
-        response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload)}], response_format={"type": "json_object"})
+        
+        system_prompt = """
+        You are an elite eCommerce Analyst. Analyze the data provided.
+        Return a VALID JSON object with exactly these keys:
+        {
+            "headline": "A short, punchy 1-sentence summary of performance.",
+            "wins": ["Win 1", "Win 2"],
+            "warnings": ["Warning 1", "Warning 2"],
+            "action_plan": "One clear strategic recommendation.",
+            "suggested_questions": ["Question 1", "Question 2", "Question 3"]
+        }
+        Do not include markdown formatting (like ```json). Just the raw JSON string.
+        """
+        
+        # Using safe default=str to catch any non-serializable data
+        response = client.chat.completions.create(
+            model="gpt-4o", 
+            messages=[
+                {"role": "system", "content": system_prompt}, 
+                {"role": "user", "content": json.dumps(analysis_payload, default=str)}
+            ], 
+            response_format={"type": "json_object"}
+        )
         return json.loads(response.choices[0].message.content)
-    except Exception: return {"headline": "Analysis Unavailable", "wins": [], "warnings": [], "action_plan": "Check API keys.", "suggested_questions": []}
+    except Exception as e: 
+        return {"headline": "Analysis Unavailable", "wins": [], "warnings": [f"Error: {str(e)}"], "action_plan": "Check data connection.", "suggested_questions": []}
 
 # --- 5. APP STATE ---
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
@@ -320,9 +356,12 @@ def run_sync_logic():
                 st.session_state['context'] = ctx
                 
                 briefing = generate_briefing(ctx, shop_data, meta_data)
-                wins_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in briefing.get('wins', [])])
-                warn_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in briefing.get('warnings', [])])
-                briefing_html = f"""<div class="briefing-card"><div class="briefing-head">⚡ DAILY INTELLIGENCE</div><div style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;">{briefing.get('headline')}</div><div style="margin-bottom: 10px;"><div style="color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WINS</div>{wins_html}</div><div style="margin-bottom: 10px;"><div style="color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WARNINGS</div>{warn_html}</div><div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;"><div style="color: #0A84FF; font-size: 12px; font-weight: 600;">RECOMMENDATION</div><div style="font-size: 13px; color: #ccc;">{briefing.get('action_plan')}</div></div></div>"""
+                
+                # FIX: Construct HTML as a single flat string to avoid indent issues
+                wins_items = "".join([f"<div class='briefing-item'><span class='briefing-icon'>✅</span>{x}</div>" for x in briefing.get('wins', [])])
+                warn_items = "".join([f"<div class='briefing-item'><span class='briefing-icon'>⚠️</span>{x}</div>" for x in briefing.get('warnings', [])])
+                
+                briefing_html = f"<div class='briefing-card'><div class='briefing-head'>⚡ DAILY INTELLIGENCE</div><div style='font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;'>{briefing.get('headline')}</div><div style='margin-bottom: 10px;'><div style='color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WINS</div>{wins_items}</div><div style='margin-bottom: 10px;'><div style='color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WARNINGS</div>{warn_items}</div><div style='margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;'><div style='color: #0A84FF; font-size: 12px; font-weight: 600;'>RECOMMENDATION</div><div style='font-size: 13px; color: #ccc;'>{briefing.get('action_plan')}</div></div></div>"
                 
                 st.session_state.messages.append({
                     "role": "assistant", "content": briefing_html, 
@@ -340,7 +379,7 @@ if st.session_state.last_synced_dates != (s_d, e_d): run_sync_logic()
 # --- 7. CSS ---
 st.markdown(f"""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+    @import url('[https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap](https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap)');
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; background-color: #000; color: #fff; height: 100vh; overflow: hidden !important; }}
     header[data-testid="stHeader"] {{ background-color: transparent !important; z-index: 999; pointer-events: none; }}
     header[data-testid="stHeader"] button {{ pointer-events: auto; }}
@@ -439,18 +478,18 @@ with dash_col:
                         cols = st.columns(3)
                         for i, ad in enumerate(ads):
                             with cols[i % 3]:
-                                img_src = ad.get('image_url') or "https://via.placeholder.com/300x300/222/888?text=No+Image"
+                                img_src = ad.get('image_url') or "[https://via.placeholder.com/300x300/222/888?text=No+Image](https://via.placeholder.com/300x300/222/888?text=No+Image)"
                                 roas_val = ad['roas']
                                 badge_color = "rgba(0, 200, 83, 0.9); color: #fff;" if roas_val >= 3.0 else "rgba(255, 214, 0, 0.9); color: #000;" if roas_val >= 1.5 else "rgba(255, 61, 0, 0.9); color: #fff;"
-                                link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
-                                st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="ad-card"><div class="ad-image-container"><div class="ad-bg" style="background-image: url('{img_src}');"></div><img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'"><div class="ad-link-icon">↗</div><div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div></div><div class="ad-footer"><div class="ad-title" title="{ad['name']}">{ad['name']}</div><div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div><div class="grid-stats"><div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div><div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div><div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div><div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div><div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div><div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div></div><div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div></div></div></a>""", unsafe_allow_html=True)
+                                link = ad.get('link') or f"[https://www.facebook.com/ads/library/?id=](https://www.facebook.com/ads/library/?id=){ad['id']}"
+                                st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="ad-card"><div class="ad-image-container"><div class="ad-bg" style="background-image: url('{img_src}');"></div><img src="{img_src}" class="ad-image" onerror="this.src='[https://via.placeholder.com/300x300/222/888?text=Video+Ad](https://via.placeholder.com/300x300/222/888?text=Video+Ad)'"><div class="ad-link-icon">↗</div><div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div></div><div class="ad-footer"><div class="ad-title" title="{ad['name']}">{ad['name']}</div><div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div><div class="grid-stats"><div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div><div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div><div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div><div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div><div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div><div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div></div><div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div></div></div></a>""", unsafe_allow_html=True)
                     else:
                         for ad in ads:
-                            img_src = ad.get('image_url') or "https://via.placeholder.com/100x100/222/888?text=Img"
+                            img_src = ad.get('image_url') or "[https://via.placeholder.com/100x100/222/888?text=Img](https://via.placeholder.com/100x100/222/888?text=Img)"
                             roas_val = ad['roas']
                             badge_color = "#00E676" if roas_val >= 3.0 else "#FFD600" if roas_val >= 1.5 else "#FF3D00"
-                            link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
-                            st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="list-row"><img src="{img_src}" class="list-img" onerror="this.src='https://via.placeholder.com/100x100/222/888?text=Ad'"><div class="list-content"><div class="list-info"><div style="font-weight:600; color:#fff; font-size:13px; margin-bottom:4px;">{ad['name']}</div><div style="font-size:11px; color:#666;">{ad['campaign']} • Live {ad['days_live']}d</div></div><div class="list-metrics"><div>Spend <div class="list-val">${ad['spend']:,.0f}</div></div><div>Sales <div class="list-val">{ad['purchases']}</div></div><div>CPA <div class="list-val">${ad['cpa']:.2f}</div></div><div>ROAS <div class="list-val" style="color:{badge_color}">{roas_val}x</div></div></div></div></div></a>""", unsafe_allow_html=True)
+                            link = ad.get('link') or f"[https://www.facebook.com/ads/library/?id=](https://www.facebook.com/ads/library/?id=){ad['id']}"
+                            st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="list-row"><img src="{img_src}" class="list-img" onerror="this.src='[https://via.placeholder.com/100x100/222/888?text=Ad](https://via.placeholder.com/100x100/222/888?text=Ad)'"><div class="list-content"><div class="list-info"><div style="font-weight:600; color:#fff; font-size:13px; margin-bottom:4px;">{ad['name']}</div><div style="font-size:11px; color:#666;">{ad['campaign']} • Live {ad['days_live']}d</div></div><div class="list-metrics"><div>Spend <div class="list-val">${ad['spend']:,.0f}</div></div><div>Sales <div class="list-val">{ad['purchases']}</div></div><div>CPA <div class="list-val">${ad['cpa']:.2f}</div></div><div>ROAS <div class="list-val" style="color:{badge_color}">{roas_val}x</div></div></div></div></div></a>""", unsafe_allow_html=True)
                 else: st.info("No active creatives found in this date range.")
             with tab4:
                 st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
@@ -459,25 +498,20 @@ with dash_col:
 
 with chat_col:
     with st.container(height=780, border=False):
-        if 'briefing' in st.session_state and st.session_state.briefing:
-            b = st.session_state.briefing
-            wins_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in b.get('wins', [])])
-            warn_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in b.get('warnings', [])])
-            st.markdown(f"""<div class="briefing-card"><div class="briefing-head">⚡ DAILY INTELLIGENCE</div><div style="font-weight: 600; margin-bottom: 12px; color: #fff;">{b.get('headline')}</div><div style="margin-bottom: 10px;"><div style="color: #00E676; font-weight: 600; margin-bottom: 4px;">WINS</div>{wins_html}</div><div style="margin-bottom: 10px;"><div style="color: #FF3D00; font-weight: 600; margin-bottom: 4px;">WARNINGS</div>{warn_html}</div><div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;"><div style="color: #0A84FF; font-weight: 600;">RECOMMENDATION</div><div style="color: #ccc;">{b.get('action_plan')}</div></div></div>""", unsafe_allow_html=True)
-
-        for msg in st.session_state.messages:
+        for i, msg in enumerate(st.session_state.messages):
             if msg["role"] == "user":
                 st.markdown(f"""<div class="chat-row user-row"><div class="chat-bubble user-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
             else:
-                if "<div" in msg['content']: st.markdown(msg['content'], unsafe_allow_html=True)
-                else: st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
-                
-                if msg.get('suggestions'):
-                    cols = st.columns(len(msg['suggestions']))
-                    for idx, sug in enumerate(msg['suggestions']):
-                        if cols[idx].button(sug, key=f"sug_{i}_{idx}"):
-                            st.session_state.trigger_prompt = sug
-                            st.rerun()
+                if "<div" in msg['content']: 
+                    st.markdown(msg['content'], unsafe_allow_html=True)
+                    if msg.get('suggestions'):
+                        cols = st.columns(len(msg['suggestions']))
+                        for idx, sug in enumerate(msg['suggestions']):
+                            if cols[idx].button(sug, key=f"sug_{i}_{idx}"):
+                                st.session_state.trigger_prompt = sug
+                                st.rerun()
+                else: 
+                    st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
         st.markdown('<div id="end-of-chat"></div>', unsafe_allow_html=True)
 
 if 'trigger_prompt' in st.session_state and st.session_state.trigger_prompt:
