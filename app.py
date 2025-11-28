@@ -3,6 +3,7 @@ import openai
 import pandas as pd
 import requests
 import plotly.graph_objects as go
+import json
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
@@ -165,16 +166,43 @@ def fetch_meta_data(token, account_id):
     try:
         base_url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
         
-        # 1. Campaign Level
-        cmp_params = {'access_token': token, 'date_preset': 'last_30d', 'level': 'campaign', 'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc'}
+        # Calculate explicit dates to force "Today" to be included
+        today = datetime.now()
+        start_date = (today - timedelta(days=29)).strftime('%Y-%m-%d') # Last 30 days
+        end_date = today.strftime('%Y-%m-%d') # Today
+        
+        # Define the time range JSON
+        time_range = json.dumps({'since': start_date, 'until': end_date})
+        
+        # 1. Campaign Level (Increased limit to 100 to catch all campaigns)
+        cmp_params = {
+            'access_token': token, 
+            'time_range': time_range, 
+            'level': 'campaign', 
+            'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc',
+            'limit': 100 
+        }
         cmp_res = requests.get(base_url, params=cmp_params)
         
-        # 2. Daily Spend
-        daily_params = {'access_token': token, 'date_preset': 'last_30d', 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start'}
+        # 2. Daily Spend (Explicitly asking for 50 rows to ensure we get all 30 days)
+        daily_params = {
+            'access_token': token, 
+            'time_range': time_range, 
+            'level': 'account', 
+            'time_increment': 1, 
+            'fields': 'spend,date_start',
+            'limit': 50 
+        }
         daily_res = requests.get(base_url, params=daily_params)
         
-        # 3. Ad Level
-        ad_params = {'access_token': token, 'date_preset': 'last_7d', 'level': 'ad', 'fields': 'ad_name,spend,ctr,cpm,action_values', 'limit': 20}
+        # 3. Ad Level (For AI Context)
+        ad_params = {
+            'access_token': token, 
+            'date_preset': 'last_7d', # Keep this as preset for simplicity
+            'level': 'ad', 
+            'fields': 'ad_name,spend,ctr,cpm,action_values', 
+            'limit': 20
+        }
         ad_res = requests.get(base_url, params=ad_params)
 
         if cmp_res.status_code == 200 and daily_res.status_code == 200:
@@ -184,19 +212,29 @@ def fetch_meta_data(token, account_id):
             
             daily_spend_map = {}
             total_spend = 0
+            
             for d in daily_data:
+                # Ensure we parse the specific date Meta returned
                 daily_spend_map[d['date_start']] = float(d['spend'])
                 total_spend += float(d['spend'])
                 
             df_daily_spend = pd.DataFrame(list(daily_spend_map.items()), columns=['date', 'spend'])
-            df_daily_spend['date'] = pd.to_datetime(df_daily_spend['date'])
+            
+            if not df_daily_spend.empty:
+                df_daily_spend['date'] = pd.to_datetime(df_daily_spend['date'])
 
             campaigns = []
             for c in cmp_data:
                 spend = float(c.get('spend', 0))
                 actions = c.get('action_values', [])
                 sales_val = sum([float(a['value']) for a in actions if a['action_type'] == 'purchase']) if actions else 0
-                campaigns.append({"Campaign": c.get('campaign_name'), "Spend": spend, "Sales": sales_val, "ROAS": round(sales_val/spend, 2) if spend>0 else 0, "CTR": float(c.get('ctr', 0))})
+                campaigns.append({
+                    "Campaign": c.get('campaign_name'),
+                    "Spend": spend,
+                    "Sales": sales_val,
+                    "ROAS": round(sales_val/spend, 2) if spend>0 else 0,
+                    "CTR": float(c.get('ctr', 0))
+                })
             
             top_ads = []
             for a in ad_data:
@@ -213,7 +251,8 @@ def fetch_meta_data(token, account_id):
                 "total_spend": total_spend,
                 "top_ads_list": top_ads
             }, None
-        else: return None, f"Meta Error: {cmp_res.text}"
+        else: 
+            return None, f"Meta Error: {daily_res.text}" # Changed to daily_res to debug this specific issue
     except Exception as e: return None, f"Meta Crash: {e}"
 
 # --- 4. APP STATE ---
