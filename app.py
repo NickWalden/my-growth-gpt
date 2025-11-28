@@ -113,19 +113,18 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
 def fetch_ad_creatives_batch(token, ad_ids):
     """
     Step 2: Fetch Creative Data using the Ad IDs.
-    This runs against the GRAPH API (Nodes), not the INSIGHTS API.
+    UPGRADE: We now request 'thumbnail_url' AND 'image_url' AND check nested fields.
     """
     if not ad_ids: return {}
     image_map = {}
     
-    # Chunking
     chunks = [ad_ids[i:i + 50] for i in range(0, len(ad_ids), 50)]
     
     for chunk in chunks:
         try:
             ids_str = ",".join(chunk)
-            # Query the AD Object to get the creative fields
-            url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=creative{{thumbnail_url,image_url,object_story_spec,asset_feed_spec}}&access_token={token}"
+            # UPGRADE: Requesting image_url explicitly first
+            url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=creative{{image_url,thumbnail_url,object_story_spec,asset_feed_spec}}&access_token={token}"
             res = requests.get(url)
             
             if res.status_code == 200:
@@ -134,19 +133,23 @@ def fetch_ad_creatives_batch(token, ad_ids):
                     creative = val.get('creative', {})
                     img = None
                     
-                    # 1. Direct Image
-                    img = creative.get('image_url') or creative.get('thumbnail_url')
+                    # 1. High Res Image (Standard Ads)
+                    img = creative.get('image_url')
                     
-                    # 2. Object Story (Posts/Videos)
+                    # 2. Fallback to Thumbnail (Videos)
+                    if not img: img = creative.get('thumbnail_url')
+                    
+                    # 3. Object Story (Posts/Videos)
                     if not img:
                         try:
                             spec = creative.get('object_story_spec', {})
+                            # Check Full Picture first (Highest Res)
                             img = spec.get('link_data', {}).get('picture') or \
                                   spec.get('photo_data', {}).get('image_url') or \
                                   spec.get('video_data', {}).get('image_url')
                         except: pass
                     
-                    # 3. Dynamic Creative (DCO)
+                    # 4. Dynamic Creative (DCO)
                     if not img:
                         try:
                             images = creative.get('asset_feed_spec', {}).get('images', [])
@@ -172,18 +175,17 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         daily_params = {'access_token': token, 'time_range': time_range, 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100}
         daily_res = requests.get(base_url, params=daily_params)
         
-        # 3. Ad Level (FIX: REMOVED 'creative' from here. We only get ad_id)
+        # 3. Ad Level
         ad_params = {
             'access_token': token, 
             'time_range': time_range, 
             'level': 'ad',
-            'fields': 'ad_id,ad_name,spend,ctr,cpm,action_values', # <--- FIXED
+            'fields': 'ad_id,ad_name,spend,ctr,cpm,action_values', 
             'limit': 50, 
             'sort': ['spend_descending']
         }
         ad_res = requests.get(base_url, params=ad_params)
 
-        # ERROR CHECKING
         if cmp_res.status_code != 200: return None, f"Meta Campaign Error: {cmp_res.text}"
         if daily_res.status_code != 200: return None, f"Meta Daily Error: {daily_res.text}"
         if ad_res.status_code != 200: return None, f"Meta Ad Error: {ad_res.text}"
@@ -204,7 +206,6 @@ def fetch_meta_data(token, account_id, start_date, end_date):
             sales_val = sum([float(a['value']) for a in actions if a['action_type'] == 'purchase']) if actions else 0
             campaigns.append({"Campaign": c.get('campaign_name'), "Spend": spend, "Sales": sales_val, "ROAS": round(sales_val/spend, 2) if spend>0 else 0, "CTR": float(c.get('ctr', 0))})
         
-        # Process Gallery (Step 1: Collect IDs)
         gallery_ads = []
         ad_ids_to_fetch = []
         
@@ -213,8 +214,6 @@ def fetch_meta_data(token, account_id, start_date, end_date):
             if spend > 0 or int(a.get('impressions', 0)) > 10:
                 actions = a.get('action_values', [])
                 sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
-                
-                # Insights usually returns 'ad_id', but checking both
                 ad_id = a.get('ad_id') or a.get('id')
                 
                 if ad_id:
@@ -226,7 +225,6 @@ def fetch_meta_data(token, account_id, start_date, end_date):
                         "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0))
                     })
         
-        # Step 2: Fetch Images separately
         if ad_ids_to_fetch:
             image_map = fetch_ad_creatives_batch(token, list(set(ad_ids_to_fetch)))
             for ad in gallery_ads:
@@ -326,7 +324,9 @@ st.markdown(f"""
     .ad-card {{ background-color: #111; border: 1px solid #222; border-radius: 12px; overflow: hidden; margin-bottom: 20px; transition: transform 0.2s; position: relative; aspect-ratio: 4/5; }}
     .ad-card:hover {{ border-color: #444; transform: translateY(-2px); z-index: 10; }}
     .ad-bg {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-size: cover; background-position: center; filter: blur(10px) brightness(0.5); z-index: 1; }}
-    .ad-image {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }}
+    /* Force Image to Fill Card with Cover */
+    .ad-image {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover !important; z-index: 2; }}
+    
     .ad-overlay {{ position: absolute; bottom: 0; left: 0; width: 100%; background: rgba(0,0,0,0.85); padding: 10px; transform: translateY(100%); transition: transform 0.2s ease; z-index: 3; border-top: 1px solid #333; }}
     .ad-card:hover .ad-overlay {{ transform: translateY(0); }}
     .ad-badge-top {{ position: absolute; top: 8px; right: 8px; z-index: 4; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; backdrop-filter: blur(4px); }}
@@ -368,12 +368,9 @@ with dash_col:
                     st.plotly_chart(fig, use_container_width=True)
             
             with tab2:
-                # Gallery Controls
                 sort_mode = st.selectbox("Sort By", ["Highest Spend", "Best ROAS", "Highest CTR"], label_visibility="collapsed")
-                
                 ads = m_data.get('gallery_ads', [])
                 if ads:
-                    # Sort
                     if sort_mode == "Highest Spend": ads = sorted(ads, key=lambda x: x['spend'], reverse=True)
                     elif sort_mode == "Best ROAS": ads = sorted(ads, key=lambda x: x['roas'], reverse=True)
                     elif sort_mode == "Highest CTR": ads = sorted(ads, key=lambda x: x['ctr'], reverse=True)
@@ -382,8 +379,6 @@ with dash_col:
                     for i, ad in enumerate(ads):
                         with cols[i % 3]:
                             img_src = ad.get('image_url') or "https://via.placeholder.com/300x300/222/888?text=No+Image"
-                            
-                            # Badge Color
                             roas_val = ad['roas']
                             if roas_val >= 3.0: badge_color = "rgba(0, 200, 83, 0.9); color: #fff;"
                             elif roas_val >= 1.5: badge_color = "rgba(255, 214, 0, 0.9); color: #000;"
@@ -399,6 +394,9 @@ with dash_col:
                                     <div class="row-split">
                                         <div><div class="text-sm">Spend</div><div class="text-val">${ad['spend']:,.0f}</div></div>
                                         <div style="text-align:right;"><div class="text-sm">CTR</div><div class="text-val">{ad['ctr']:.2f}%</div></div>
+                                    </div>
+                                    <div class="row-split" style="margin-top:5px;">
+                                        <div><div class="text-sm">CPM</div><div class="text-val">${ad['cpm']:.2f}</div></div>
                                     </div>
                                 </div>
                             </div>
