@@ -196,8 +196,6 @@ def fetch_meta_data(token, account_id, start_date, end_date):
             if spend > 0 or int(a.get('impressions', 0)) > 10:
                 actions = a.get('actions', [])
                 action_values = a.get('action_values', [])
-                
-                # EXTRACT METRICS
                 purchases = sum([float(x['value']) for x in actions if x['action_type'] == 'purchase'])
                 revenue = sum([float(x['value']) for x in action_values if x['action_type'] == 'purchase'])
                 roas = round(revenue/spend, 2) if spend > 0 else 0
@@ -211,17 +209,9 @@ def fetch_meta_data(token, account_id, start_date, end_date):
                     ad_ids_to_fetch.append(ad_id)
                     gallery_ads.append({
                         "id": ad_id,
-                        "name": a['ad_name'], 
-                        "campaign": a.get('campaign_name', 'Unknown'),
-                        "adset": a.get('adset_name', 'Unknown'),
-                        "days_live": days_live,
-                        "spend": spend,
-                        "revenue": revenue,
-                        "purchases": int(purchases),
-                        "cpa": cpa,
-                        "roas": roas,
-                        "ctr": float(a.get('ctr', 0)), 
-                        "cpm": float(a.get('cpm', 0))
+                        "name": a['ad_name'], "campaign": a.get('campaign_name', 'Unknown'), "adset": a.get('adset_name', 'Unknown'),
+                        "days_live": days_live, "spend": spend, "revenue": revenue, "purchases": int(purchases), "cpa": cpa,
+                        "roas": roas, "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0))
                     })
         
         if ad_ids_to_fetch:
@@ -276,7 +266,8 @@ with st.sidebar:
                     df_s, df_m = shop_data['daily_df'], meta_data['daily_spend_df']
                     if not df_s.empty and not df_m.empty:
                         df_merged = pd.merge(df_s, df_m, on='date', how='outer').fillna(0)
-                        df_merged['gross_profit'] = df_merged['sales'] - df_merged['c cogs']
+                        # FIXED TYPO HERE: Changed 'c cogs' to 'cogs'
+                        df_merged['gross_profit'] = df_merged['sales'] - df_merged['cogs']
                         df_merged['net_profit'] = df_merged['gross_profit'] - df_merged['spend']
                         df_merged = df_merged.sort_values('date')
                         total_net_profit = df_merged['net_profit'].sum()
@@ -325,18 +316,16 @@ st.markdown(f"""
     .ad-image-container {{ position: relative; width: 100%; height: 220px; background-color: #000; overflow: hidden; }}
     .ad-bg {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-size: cover; background-position: center; filter: blur(20px) brightness(0.5); z-index: 1; }}
     .ad-image {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }}
-    
-    /* FOOTER GRID */
     .ad-footer {{ background-color: #161616; padding: 12px; border-top: 1px solid #222; flex-grow: 1; }}
     .ad-title {{ font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
     .ad-badge-top {{ position: absolute; top: 8px; right: 8px; z-index: 4; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; backdrop-filter: blur(4px); }}
     .ad-link-icon {{ position: absolute; top: 8px; left: 8px; z-index: 4; padding: 4px; border-radius: 50%; background: rgba(0,0,0,0.6); color: white; backdrop-filter: blur(4px); }}
-    
     .grid-stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 11px; color: #888; }}
     .stat-box {{ margin-bottom: 4px; }}
     .text-val {{ font-weight: 600; color: #eee; font-size: 12px; }}
-    
     .context-tag {{ font-size: 10px; background: #222; padding: 2px 6px; border-radius: 4px; color: #888; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
+    .btn-view {{ display: block; width: 100%; text-align: center; background: #222; color: #ccc; font-size: 11px; padding: 6px 0; border-radius: 6px; margin-top: 8px; transition: background 0.2s; }}
+    .btn-view:hover {{ background: #333; color: white; }}
     a {{ text-decoration: none; color: inherit; }}
 </style>
 """, unsafe_allow_html=True)
@@ -391,32 +380,31 @@ with dash_col:
                             
                             link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
                             
-                            # FIXED INDENTATION HERE
                             st.markdown(f"""
-<a href="{link}" target="_blank">
-    <div class="ad-card">
-        <div class="ad-image-container">
-            <div class="ad-bg" style="background-image: url('{img_src}');"></div>
-            <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
-            <div class="ad-link-icon">↗</div>
-            <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
-        </div>
-        <div class="ad-footer">
-            <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
-            <div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div>
-            <div class="grid-stats">
-                <div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div>
-                <div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div>
-                <div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div>
-                <div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div>
-                <div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div>
-                <div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div>
-            </div>
-            <div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div>
-        </div>
-    </div>
-</a>
-""", unsafe_allow_html=True)
+                            <a href="{link}" target="_blank">
+                                <div class="ad-card">
+                                    <div class="ad-image-container">
+                                        <div class="ad-bg" style="background-image: url('{img_src}');"></div>
+                                        <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
+                                        <div class="ad-link-icon">↗</div>
+                                        <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
+                                    </div>
+                                    <div class="ad-footer">
+                                        <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
+                                        <div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div>
+                                        <div class="grid-stats">
+                                            <div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div>
+                                            <div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div>
+                                            <div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div>
+                                            <div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div>
+                                            <div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div>
+                                            <div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div>
+                                        </div>
+                                        <div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div>
+                                    </div>
+                                </div>
+                            </a>
+                            """, unsafe_allow_html=True)
                 else: st.info("No active creatives found in this date range.")
 
             with tab3:
