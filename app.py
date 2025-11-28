@@ -15,85 +15,78 @@ st.set_page_config(
 )
 
 # --- 2. APPLE UI DESIGN SYSTEM (CSS) ---
-# This block overrides Streamlit's defaults to look like iOS/macOS
 st.markdown("""
 <style>
-    /* 1. Global Typography (San Francisco) */
+    /* 1. Global Typography & Colors */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
     
     html, body, [class*="css"] {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background-color: #000000; /* True Black Background */
+        color: #ffffff;
     }
 
-    /* 2. Apple-Style Cards (Metrics) */
-    div[data-testid="stMetric"] {
-        background-color: #1C1C1E; /* iOS Dark Surface */
-        border: 1px solid #2C2C2E;
-        padding: 20px;
-        border-radius: 16px; /* Smooth Corners */
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        transition: transform 0.2s ease;
-    }
-    div[data-testid="stMetric"]:hover {
-        border-color: #007AFF; /* Apple Blue Hover */
-        transform: translateY(-2px);
-    }
-    
-    /* 3. Buttons (Pill Shapes) */
-    div.stButton > button {
-        border-radius: 20px !important;
-        font-weight: 600 !important;
-        padding: 0.5rem 1.5rem !important;
-        border: none !important;
-        transition: all 0.2s !important;
-    }
-    /* Primary Button (Apple Blue) */
-    div.stButton > button[kind="primary"] {
-        background: linear-gradient(180deg, #007AFF 0%, #0062CC 100%) !important;
-        box-shadow: 0 2px 8px rgba(0, 122, 255, 0.3);
-    }
-    /* Secondary Button (Dark Grey) */
-    div.stButton > button[kind="secondary"] {
-        background-color: #2C2C2E !important;
-        color: #E5E5E7 !important;
-    }
-
-    /* 4. Tables (Clean & Minimal) */
-    div[data-testid="stDataFrame"] {
-        border: 1px solid #2C2C2E !important;
-        border-radius: 12px !important;
-        overflow: hidden;
-    }
-
-    /* 5. Chat Bubbles (iMessage Style) */
-    .stChatMessage {
-        background-color: transparent !important;
-    }
-    div[data-testid="stChatMessageContent"] {
-        border-radius: 18px !important;
-        padding: 16px !important;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
-    /* Assistant Bubble */
-    div[data-testid="chatAvatarIcon-assistant"] + div div[data-testid="stChatMessageContent"] {
-        background-color: #1C1C1E !important;
-        border: 1px solid #2C2C2E;
-    }
-    /* User Bubble */
-    div[data-testid="chatAvatarIcon-user"] + div div[data-testid="stChatMessageContent"] {
-        background-color: #0A84FF !important; /* iOS Blue */
-        color: white !important;
-    }
-
-    /* 6. Sidebar styling */
-    section[data-testid="stSidebar"] {
+    /* 2. STICKY TABS & HEADER */
+    /* This makes the Tab Bar stick to the top of the screen */
+    .stTabs [data-baseweb="tab-list"] {
+        position: sticky;
+        top: 3rem; /* Height of the top decoration */
+        z-index: 10;
         background-color: #000000;
-        border-right: 1px solid #1C1C1E;
+        padding-top: 1rem;
+        padding-bottom: 1rem;
+        border-bottom: 1px solid #1C1C1E;
+    }
+
+    /* 3. iMESSAGE STYLE CHAT */
+    /* User Message (Right Aligned, Blue) */
+    div[data-testid="stChatMessage"]:nth-child(even) {
+        flex-direction: row-reverse;
+        text-align: right;
+    }
+    div[data-testid="stChatMessage"]:nth-child(even) div[data-testid="stChatMessageContent"] {
+        background-color: #007AFF !important; /* iOS Blue */
+        color: white !important;
+        border-radius: 20px 20px 4px 20px !important; /* Speech Bubble Shape */
+        margin-right: 10px;
+    }
+
+    /* Assistant Message (Left Aligned, Grey) */
+    div[data-testid="stChatMessage"]:nth-child(odd) div[data-testid="stChatMessageContent"] {
+        background-color: #1C1C1E !important; /* iOS Dark Grey */
+        border: 1px solid #2C2C2E;
+        border-radius: 20px 20px 20px 4px !important;
+        margin-left: 10px;
+    }
+
+    /* Avatars */
+    div[data-testid="chatAvatarIcon-user"] {
+        background-color: #1C1C1E !important;
+    }
+    div[data-testid="chatAvatarIcon-assistant"] {
+        background-color: #007AFF !important;
+    }
+
+    /* 4. METRICS & CARDS */
+    div[data-testid="stMetric"] {
+        background-color: #1C1C1E;
+        border: 1px solid #2C2C2E;
+        padding: 15px;
+        border-radius: 16px;
     }
     
-    /* Hide Default Header */
-    header {visibility: hidden;}
+    /* 5. SIDEBAR VISIBILITY FIX */
+    /* We hide the red decoration bar but KEEP the hamburger/arrow accessible */
+    header[data-testid="stHeader"] {
+        background-color: transparent;
+    }
     
+    /* 6. BOTTOM SPACING FOR STICKY INPUT */
+    /* Ensures last message isn't hidden behind input box */
+    .block-container {
+        padding-bottom: 150px;
+    }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -172,7 +165,7 @@ with st.sidebar:
     # Primary Refresh Action
     if st.button("🔄 Sync Data", type="primary"):
         with st.spinner("Syncing..."):
-            st.session_state.logs = [] # Clear logs
+            st.session_state.logs = [] 
             try:
                 s_domain, s_token = st.secrets["SHOPIFY_DOMAIN"], st.secrets["SHOPIFY_TOKEN"]
                 m_token, m_id = st.secrets["META_TOKEN"], st.secrets["META_ACCOUNT_ID"]
@@ -208,7 +201,7 @@ with st.sidebar:
         st.rerun()
 
 # MAIN CONTENT AREA
-st.markdown("## Dashboard")
+# We removed the top header text to save space for sticky tabs
 
 # TAB NAVIGATION
 tab1, tab2 = st.tabs(["Overview", "AI Strategist"])
@@ -225,9 +218,9 @@ with tab1:
         c3.metric("ROAS", f"{ctx['roas']:.2f}x", delta="Target: 3.0x")
         c4.metric("Est. Profit", f"${(ctx['total_sales']*0.6 - ctx['total_spend']):,.0f}")
 
-        st.markdown("<br>", unsafe_allow_html=True) # Spacer
+        st.markdown("<br>", unsafe_allow_html=True) 
 
-        # 2. Chart (Clean, Minimal Grid)
+        # 2. Chart
         st.subheader("Sales Velocity")
         if not ctx['daily_sales'].empty:
             fig = go.Figure()
@@ -261,23 +254,26 @@ with tab1:
 
 # CHAT TAB
 with tab2:
-    st.markdown("### Assistant")
+    # Sticky container for chat history
+    chat_container = st.container()
     
-    # Chat History
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    with chat_container:
+        for i, msg in enumerate(st.session_state.messages):
+            # We iterate to apply CSS classes cleanly
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
 
-    # Input Area
+    # Input Area - Stays sticky to bottom automatically
     if prompt := st.chat_input("Ask a question..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        # Immediate user feedback
         with st.chat_message("user"): st.markdown(prompt)
         save_memory("user", prompt)
         
         try:
             client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
             
-            # Apple-style Thinking Status
             with st.status("Thinking...", expanded=True) as status:
                 st.write("Accessing Secure Context...")
                 context_str = ""
@@ -287,12 +283,11 @@ with tab2:
                 st.write("Processing Strategy...")
                 status.update(label="Complete", state="complete", expanded=False)
             
-            # Response
             history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
             final_prompt = f"You are an elite Media Buyer. Be concise, tactical, and data-driven.\n\n{context_str}"
             
             stream = client.chat.completions.create(
-                model="gpt-5.1",
+                model="gpt-4o",
                 messages=[{"role": "system", "content": final_prompt}] + 
                          [{"role": m["role"], "content": m["content"]} for m in history],
                 stream=True
@@ -300,5 +295,8 @@ with tab2:
             with st.chat_message("assistant"): response = st.write_stream(stream)
             st.session_state.messages.append({"role": "assistant", "content": response})
             save_memory("assistant", response)
+            
+            # Force refresh to ensure alignment applies to new messages
+            st.rerun()
             
         except Exception as e: st.error(f"Error: {e}")
