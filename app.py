@@ -9,30 +9,45 @@ import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
-# --- 1. PAGE CONFIGURATION ---
+# --- 1. CONFIGURATION ---
 st.set_page_config(
     page_title="Growth OS",
     page_icon="",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+AI_MODEL = "gpt-4o" # Change to "gpt-5.1" if available
 
-# --- 2. MEMORY FUNCTIONS ---
+# --- 2. MEMORY FUNCTIONS (With Meta-Data Support) ---
 def load_memory():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         df = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         if df.empty or "role" not in df.columns: return []
-        return df.to_dict("records")
+        
+        # Parse out suggestions if hidden in content
+        records = df.to_dict("records")
+        for r in records:
+            if "|||" in r['content']:
+                parts = r['content'].split("|||")
+                r['content'] = parts[0]
+                try: r['suggestions'] = json.loads(parts[1])
+                except: r['suggestions'] = []
+        return records
     except Exception: return []
 
-def save_memory(role, content):
+def save_memory(role, content, suggestions=None):
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         try: existing_data = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         except Exception: existing_data = pd.DataFrame(columns=["timestamp", "role", "content"])
-        if isinstance(content, dict): content = json.dumps(content)
-        new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": content}])
+        
+        # Serialize suggestions into content string for persistence
+        save_content = content
+        if suggestions:
+            save_content = f"{content}|||{json.dumps(suggestions)}"
+            
+        new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": save_content}])
         updated_data = pd.concat([existing_data, new_row], ignore_index=True)
         conn.update(worksheet="ChatHistory", data=updated_data)
     except Exception: pass
@@ -231,24 +246,30 @@ def generate_briefing(ctx, s_data, m_data):
         client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
         analysis_payload = {
             "period": ctx.get('date_range'),
-            "metrics": {
-                "net_profit": ctx['total_net_profit'], "revenue": s_data['total_sales'], 
-                "ad_spend": m_data['total_spend'], "blended_roas": ctx['blended_mer'], 
-                "new_customers": s_data['new_orders'], "ncpa": ctx['ncpa'], "aov": s_data['aov']
-            },
+            "metrics": {"net_profit": ctx['total_net_profit'], "revenue": s_data['total_sales'], "ad_spend": m_data['total_spend'], "blended_roas": ctx['blended_mer'], "new_customers": s_data['new_orders'], "ncpa": ctx['ncpa'], "aov": s_data['aov']},
             "top_products": [p[0] for p in s_data['top_products']],
             "campaigns": m_data['campaign_df'].to_dict('records')
         }
-        system_prompt = """You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys: {"headline": "A short, punchy 1-sentence summary.", "wins": ["Bullet 1", "Bullet 2"], "warnings": ["Bullet 1", "Bullet 2"], "action_plan": "One clear strategic recommendation."} Do not include markdown formatting. Return RAW JSON only."""
-        response = client.chat.completions.create(model="gpt-5.1", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload)}], response_format={"type": "json_object"})
+        system_prompt = """
+        You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys:
+        {
+            "headline": "A short, punchy 1-sentence summary.",
+            "wins": ["Bullet 1", "Bullet 2"],
+            "warnings": ["Bullet 1", "Bullet 2"],
+            "action_plan": "One clear strategic recommendation.",
+            "suggested_questions": ["Question 1 (Short)", "Question 2 (Short)", "Question 3 (Short)"]
+        }
+        Return RAW JSON only. No markdown.
+        """
+        response = client.chat.completions.create(model=AI_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload)}], response_format={"type": "json_object"})
         return json.loads(response.choices[0].message.content)
-    except Exception: return {"headline": "Analysis Unavailable", "wins": [], "warnings": [], "action_plan": "Check API keys."}
+    except Exception: return {"headline": "Analysis Unavailable", "wins": [], "warnings": [], "action_plan": "Check API keys.", "suggested_questions": []}
 
 # --- 5. APP STATE ---
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
-if 'briefing' not in st.session_state: st.session_state.briefing = None
 if 'logs' not in st.session_state: st.session_state.logs = []
 if 'last_synced_dates' not in st.session_state: st.session_state.last_synced_dates = None
+if 'trigger_ai_response' not in st.session_state: st.session_state.trigger_ai_response = False
 
 # --- 6. LAYOUT ---
 header_col1, header_col2 = st.columns([5, 2], gap="medium")
@@ -308,7 +329,34 @@ def run_sync_logic():
                     "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
                 }
                 st.session_state['context'] = ctx
-                st.session_state.briefing = generate_briefing(ctx, shop_data, meta_data)
+                
+                # GENERATE BRIEFING & ADD TO CHAT
+                briefing = generate_briefing(ctx, shop_data, meta_data)
+                
+                wins_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in briefing.get('wins', [])])
+                warn_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in briefing.get('warnings', [])])
+                
+                briefing_html = f"""
+                <div class="briefing-card">
+                    <div class="briefing-head">⚡ DAILY INTELLIGENCE</div>
+                    <div style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;">{briefing.get('headline')}</div>
+                    <div style="margin-bottom: 10px;"><div style="color: #00E676; font-weight: 600; margin-bottom: 4px;">WINS</div>{wins_html}</div>
+                    <div style="margin-bottom: 10px;"><div style="color: #FF3D00; font-weight: 600; margin-bottom: 4px;">WARNINGS</div>{warn_html}</div>
+                    <div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;">
+                        <div style="color: #0A84FF; font-weight: 600;">RECOMMENDATION</div>
+                        <div style="font-size: 13px; color: #ccc;">{briefing.get('action_plan')}</div>
+                    </div>
+                </div>
+                """
+                
+                # Attach suggestions to the message object for rendering later
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": briefing_html, 
+                    "suggestions": briefing.get('suggested_questions', [])
+                })
+                save_memory("assistant", briefing_html, briefing.get('suggested_questions', []))
+                
                 st.session_state.last_synced_dates = (s_d, e_d)
                 if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
             else: st.toast("Sync Failed", icon="⚠️")
@@ -328,7 +376,10 @@ st.markdown(f"""
     div[data-testid="column"] {{ height: 88vh; overflow-y: auto; overflow-x: hidden; display: block; }}
     div[data-testid="column"]:nth-of-type(2) > div {{ padding-bottom: 150px !important; }}
     [data-testid="stChatInput"] {{ position: fixed !important; bottom: 0 !important; right: 1.5rem !important; left: auto !important; width: {chat_width_pct-2}% !important; min-width: 300px; background-color: #111 !important; z-index: 9999 !important; border-top: 1px solid #333; padding-top: 15px !important; padding-bottom: 25px !important; }}
-    .chat-bubble, .chat-bubble * {{ font-size: {font_size}px !important; line-height: 1.5; }}
+    
+    /* BUBBLE & TEXT SIZE */
+    .chat-bubble, .chat-bubble *, .briefing-card, .briefing-card * {{ font-size: {font_size}px !important; line-height: 1.4; }}
+    
     .chat-bubble {{ padding: 12px 16px; border-radius: 18px; max-width: 85%; position: relative; word-wrap: break-word; margin-bottom: 4px; display: inline-block; }}
     .user-bubble {{ background-color: #0A84FF; color: white; border-bottom-right-radius: 2px; }}
     .bot-bubble {{ background-color: #262626; color: #E5E5EA; border: 1px solid #333; border-bottom-left-radius: 2px; }}
@@ -359,14 +410,17 @@ st.markdown(f"""
     .list-metrics {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; text-align: right; min-width: 250px; font-size: 11px; color: #888; }}
     .list-val {{ font-size: 13px; font-weight: 600; color: #eee; }}
     .list-badge {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; margin-left: 10px; }}
-    
-    /* BRIEFING FONT FIX */
-    .briefing-card, .briefing-card * {{ font-size: {font_size}px !important; line-height: 1.4; }}
     .briefing-card {{ background: #1E1E1E; border: 1px solid #0A84FF; border-radius: 12px; padding: 15px; margin-bottom: 20px; }}
     .briefing-head {{ color: #0A84FF; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; }}
     .briefing-item {{ margin-bottom: 4px; display: flex; align-items: flex-start; }}
     .briefing-icon {{ margin-right: 8px; }}
     a {{ text-decoration: none; color: inherit; }}
+    
+    /* SUGGESTION BUTTONS */
+    .stButton button {{
+        border: 1px solid #333; background: #1a1a1a; color: #ddd; border-radius: 20px; font-size: 12px; padding: 4px 12px; margin-right: 5px;
+    }}
+    .stButton button:hover {{ border-color: #0A84FF; color: #0A84FF; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -375,27 +429,19 @@ st.markdown(f"""
 # ==========================================
 dash_col, chat_col = st.columns([100-chat_width_pct, chat_width_pct], gap="medium")
 
+# --- LEFT: DASHBOARD ---
 with dash_col:
     with st.container(height=850, border=False):
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
-            
-            # 2 Rows of 4 grid calculation
-            # Row 1: Revenue, Orders, AOV, True Profit
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
             c2.metric("Orders", f"{s_data['order_count']:,}")
-            c3.metric("AOV", f"${s_data['aov']:.2f}")
-            c4.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
-            
-            # Row 2: Ad Spend, MER, nCPA, ROAS
-            c5, c6, c7, c8 = st.columns(4)
-            c5.metric("Ad Spend", f"${m_data['total_spend']:,.0f}")
-            c6.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
-            c7.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
-            c8.metric("FB ROAS", f"{ctx['roas']:.2f}x")
-            
+            c3.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
+            c4.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
+            c5.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
+            c6.metric("FB ROAS", f"{ctx['roas']:.2f}x")
             st.markdown("---")
             
             tab1, tab2, tab3, tab4 = st.tabs(["Growth (New vs Ret)", "Profit Chart", "Creative Gallery", "Campaigns"])
@@ -448,23 +494,41 @@ with dash_col:
 
 with chat_col:
     with st.container(height=780, border=False):
-        if 'briefing' in st.session_state and st.session_state.briefing:
-            b = st.session_state.briefing
-            wins_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in b.get('wins', [])])
-            warn_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in b.get('warnings', [])])
-            st.markdown(f"""<div class="briefing-card"><div class="briefing-head">⚡ DAILY INTELLIGENCE</div><div style="font-weight: 600; margin-bottom: 12px; color: #fff;">{b.get('headline')}</div><div style="margin-bottom: 10px;"><div style="color: #00E676; font-weight: 600; margin-bottom: 4px;">WINS</div>{wins_html}</div><div style="margin-bottom: 10px;"><div style="color: #FF3D00; font-weight: 600; margin-bottom: 4px;">WARNINGS</div>{warn_html}</div><div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;"><div style="color: #0A84FF; font-weight: 600;">RECOMMENDATION</div><div style="color: #ccc;">{b.get('action_plan')}</div></div></div>""", unsafe_allow_html=True)
-
-        for msg in st.session_state.messages:
+        for i, msg in enumerate(st.session_state.messages):
             if msg["role"] == "user":
                 st.markdown(f"""<div class="chat-row user-row"><div class="chat-bubble user-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
             else:
-                if "<div" in msg['content']: st.markdown(msg['content'], unsafe_allow_html=True)
-                else: st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
-        st.markdown("<br><br><br>", unsafe_allow_html=True)
+                if "<div" in msg['content']: 
+                    st.markdown(msg['content'], unsafe_allow_html=True)
+                    # Render suggestions if they exist in this message
+                    if msg.get('suggestions'):
+                        cols = st.columns(len(msg['suggestions']))
+                        for idx, sug in enumerate(msg['suggestions']):
+                            if cols[idx].button(sug, key=f"sug_{i}_{idx}"):
+                                st.session_state.trigger_prompt = sug
+                                st.rerun()
+                else: 
+                    st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
+        st.markdown('<div id="end-of-chat"></div>', unsafe_allow_html=True)
 
-if prompt := st.chat_input("Ask about your data..."):
+# Handle Triggered Prompt (From Buttons)
+if 'trigger_prompt' in st.session_state and st.session_state.trigger_prompt:
+    prompt = st.session_state.trigger_prompt
+    st.session_state.trigger_prompt = None # Reset
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_memory("user", prompt)
+    # Flag to run AI generation immediately below
+    run_ai = True
+else:
+    prompt = st.chat_input("Ask about your data...")
+    if prompt:
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        save_memory("user", prompt)
+        run_ai = True
+    else:
+        run_ai = False
+
+if run_ai:
     try:
         client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
         context_str = ""
@@ -494,19 +558,11 @@ js = f"""
         if (chatContainer) {{
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }}
-        // Backup selector for different Streamlit versions
-        const scrollDivs = window.parent.document.querySelectorAll('div[data-testid="stVerticalBlock"] > div');
-        scrollDivs.forEach(div => {{
-            if (div.style.overflowY === 'auto') {{
-                div.scrollTop = div.scrollHeight;
-            }}
-        }});
     }}
-    // Run multiple times to catch late loading images
-    setTimeout(scrollBottom, 100);
+    // Run on load and slightly after to catch image loads
+    scrollBottom();
     setTimeout(scrollBottom, 500);
     setTimeout(scrollBottom, 1000);
-    setTimeout(scrollBottom, 2000);
 </script>
 """
 components.html(js, height=0)
