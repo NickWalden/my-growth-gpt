@@ -71,16 +71,15 @@ def fetch_meta_campaigns(token, account_id):
         else: return None, 0, f"Meta Error {res.status_code}: {res.text}"
     except Exception as e: return None, 0, f"Meta Crash: {e}"
 
-# --- 4. APP STATE & SIDEBAR ---
+# --- 4. APP STATE & CONTROLS ---
 
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
 if 'logs' not in st.session_state: st.session_state.logs = []
 
 with st.sidebar:
-    st.markdown("### ⚙️ Console Settings")
-    
-    chat_width_pct = st.slider("Chat Width", 20, 60, 30, 5, format="%d%%")
-    font_size = st.slider("Text Size", 12, 24, 15, 1, format="%dpx")
+    st.markdown("### ⚙️ Settings")
+    chat_width_pct = st.slider("Chat Width", 20, 60, 35, 5, format="%d%%")
+    font_size = st.slider("Text Size", 12, 24, 14, 1, format="%dpx")
     
     st.divider()
     
@@ -90,13 +89,10 @@ with st.sidebar:
             try:
                 s_domain, s_token = st.secrets["SHOPIFY_DOMAIN"], st.secrets["SHOPIFY_TOKEN"]
                 m_token, m_id = st.secrets["META_TOKEN"], st.secrets["META_ACCOUNT_ID"]
-                
                 daily_df, total_sales, s_err = fetch_shopify_daily(s_domain, s_token)
                 campaign_df, total_spend, m_err = fetch_meta_campaigns(m_token, m_id)
-                
                 if s_err: st.session_state.logs.append(s_err)
                 if m_err: st.session_state.logs.append(m_err)
-
                 if daily_df is not None and campaign_df is not None:
                     st.session_state['context'] = {
                         "daily_sales": daily_df, "campaigns": campaign_df,
@@ -131,7 +127,7 @@ st.markdown(f"""
     
     header[data-testid="stHeader"] {{ display: none; }}
 
-    /* --- THE SCROLL FIX --- */
+    /* --- SCROLLING FIX --- */
     .block-container {{
         max-width: 100%;
         padding: 1rem 1rem 0 1rem;
@@ -139,6 +135,19 @@ st.markdown(f"""
         overflow: hidden !important;
     }}
     
+    /* Column Scrolling */
+    div[data-testid="column"] {{
+        height: 94vh;
+        overflow-y: auto;
+        overflow-x: hidden;
+        display: block;
+    }}
+
+    /* Extra padding for Chat Column to clear the input box */
+    div[data-testid="column"]:nth-of-type(2) > div {{
+        padding-bottom: 150px !important;
+    }}
+
     /* --- STICKY INPUT POSITIONING --- */
     [data-testid="stChatInput"] {{
         position: fixed !important;
@@ -154,20 +163,22 @@ st.markdown(f"""
         padding-bottom: 25px !important;
     }}
     
-    /* --- TEXT SIZING FIX (Targeting Everything) --- */
-    .chat-bubble, .user-bubble, .bot-bubble, .chat-bubble p, .user-bubble p, .bot-bubble p {{
+    /* --- TEXT SIZING & BUBBLE FIX --- */
+    /* We apply font-size to ALL children to ensure markdown doesn't override it */
+    .chat-bubble, .chat-bubble * {{
         font-size: {font_size}px !important; 
         line-height: 1.5;
     }}
     
-    /* Bubble Structure */
+    /* Bubble Base */
     .chat-bubble {{
         padding: 12px 16px;
         border-radius: 18px;
         max-width: 85%;
         position: relative;
         word-wrap: break-word;
-        margin-bottom: 2px;
+        margin-bottom: 4px;
+        display: inline-block; /* Fixes width wrapping */
     }}
 
     /* Colors */
@@ -193,45 +204,26 @@ dash_col, chat_col = st.columns([100-chat_width_pct, chat_width_pct], gap="mediu
 # 📊 LEFT: DASHBOARD
 # ------------------------------------------
 with dash_col:
-    # INDEPENDENT SCROLL AREA
     with st.container(height=850, border=False):
         st.markdown("## Overview")
-        
         if 'context' in st.session_state:
             ctx = st.session_state['context']
-            
-            # Metrics
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Revenue", f"${ctx['total_sales']:,.0f}")
             c2.metric("Spend", f"${ctx['total_spend']:,.0f}")
             c3.metric("ROAS", f"{ctx['roas']:.2f}x")
             c4.metric("Profit", f"${(ctx['total_sales']*0.6 - ctx['total_spend']):,.0f}")
-            
             st.markdown("---")
-            
-            # Chart
             st.subheader("Sales Trend")
             if not ctx['daily_sales'].empty:
                 fig = go.Figure()
                 fig.add_trace(go.Bar(x=ctx['daily_sales']['date'], y=ctx['daily_sales']['sales'], marker_color='#0A84FF', marker_line_width=0, opacity=0.9))
                 fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=10, b=0), height=350, xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor='#333'))
                 st.plotly_chart(fig, use_container_width=True)
-
-            # Table
             st.subheader("Campaigns")
             if not ctx['campaigns'].empty:
-                st.dataframe(
-                    ctx['campaigns'].sort_values("Spend", ascending=False),
-                    column_config={
-                        "Spend": st.column_config.NumberColumn(format="$%.0f"),
-                        "Sales": st.column_config.NumberColumn(format="$%.0f"),
-                        "ROAS": st.column_config.NumberColumn(format="%.2fx"),
-                        "Clicks": st.column_config.NumberColumn(format="%d")
-                    },
-                    hide_index=True,
-                    use_container_width=True
-                )
-                st.markdown("<br><br><br><br>", unsafe_allow_html=True)
+                st.dataframe(ctx['campaigns'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "Clicks": st.column_config.NumberColumn(format="%d")}, hide_index=True, use_container_width=True)
+                st.markdown("<br><br><br>", unsafe_allow_html=True)
         else:
             st.info("👈 Sync Data from the sidebar to begin.")
 
@@ -243,24 +235,15 @@ with chat_col:
     
     # INDEPENDENT SCROLL AREA
     with st.container(height=780, border=False):
-        
-        chat_html = '<div style="padding-bottom: 20px;">' 
         for msg in st.session_state.messages:
+            # We strip indentation to prevent Markdown Code Block interpretation
             if msg["role"] == "user":
-                chat_html += f"""
-                <div class="chat-row user-row">
-                    <div class="chat-bubble user-bubble">{msg['content']}</div>
-                </div>
-                """
+                st.markdown(f"""<div class="chat-row user-row"><div class="chat-bubble user-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
             else:
-                chat_html += f"""
-                <div class="chat-row bot-row">
-                    <div class="chat-bubble bot-bubble">{msg['content']}</div>
-                </div>
-                """
-        chat_html += "</div>"
+                st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
         
-        st.markdown(chat_html, unsafe_allow_html=True)
+        # Spacer for sticky input
+        st.markdown("<br><br><br>", unsafe_allow_html=True)
 
 # ------------------------------------------
 # ⌨️ GLOBAL INPUT
