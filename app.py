@@ -105,7 +105,8 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
             return {
                 "daily_df": df_daily, "total_sales": total_rev, "total_cogs": total_cogs,
                 "top_products": sorted(prod_sales.items(), key=lambda x: x[1], reverse=True)[:5],
-                "aov": total_rev / len(orders) if len(orders) > 0 else 0
+                "aov": total_rev / len(orders) if len(orders) > 0 else 0,
+                "order_count": len(orders) # Added Order Count
             }, None
         else: return None, f"Shopify Error {res.status_code}"
     except Exception as e: return None, f"Shopify Crash: {e}"
@@ -185,6 +186,7 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         
         gallery_ads = []
         ad_ids_to_fetch = []
+        
         for a in ad_data:
             spend = float(a.get('spend', 0))
             if spend > 0 or int(a.get('impressions', 0)) > 10:
@@ -226,14 +228,12 @@ if 'logs' not in st.session_state: st.session_state.logs = []
 if 'last_synced_dates' not in st.session_state: st.session_state.last_synced_dates = None
 
 # --- 5. TOP HEADER (Date Picker) ---
-# Column Ratio: [5, 2] to keep Date Picker tight on the right
 header_col1, header_col2 = st.columns([5, 2], gap="medium")
 
 with header_col1:
     st.markdown("# Growth OS")
 
 with header_col2:
-    # We combine Preset and Date Range into a clean layout
     preset = st.selectbox(
         "Range Preset", 
         ["Last 7 Days", "Last 30 Days", "This Month", "Last Month", "Custom"],
@@ -250,7 +250,6 @@ with header_col2:
     else: 
         s_d, e_d = today - timedelta(days=30), today
 
-    # Always show date picker for clarity, disable if preset selected? No, let user override.
     date_range = st.date_input("Custom Range", value=(s_d, e_d), label_visibility="collapsed")
     if len(date_range) == 2: s_d, e_d = date_range
 
@@ -258,7 +257,7 @@ with header_col2:
 with st.sidebar:
     st.markdown("### ⚙️ Configuration")
     chat_width_pct = st.slider("Chat Width", 20, 60, 35, 5, format="%d%%")
-    font_size = st.slider("Text Size", 12, 24, 14, 1, format="%dpx")
+    font_size = st.slider("Chat Text Size", 12, 24, 14, 1, format="%dpx")
     margin_pct = st.slider("Margin % (Fallback)", 10, 90, 60, 5, format="%d%%") / 100.0
     st.divider()
     if st.button("🔄 Force Sync", type="secondary", use_container_width=True):
@@ -310,9 +309,7 @@ st.markdown(f"""
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; background-color: #000; color: #fff; height: 100vh; overflow: hidden !important; }}
     
-    /* CLICK-THROUGH HEADER FIX */
     header[data-testid="stHeader"] {{ background-color: transparent !important; z-index: 999; pointer-events: none; }}
-    /* Re-enable clicks on the hamburger button specifically */
     header[data-testid="stHeader"] button {{ pointer-events: auto; }}
     .stApp > header {{ background-color: transparent; }}
     
@@ -372,11 +369,14 @@ with dash_col:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
             
-            c1, c2, c3, c4 = st.columns(4)
+            # --- 5 COLUMN METRICS (UPDATED) ---
+            c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
             c2.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
             c3.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
             c4.metric("FB ROAS", f"{ctx['roas']:.2f}x")
+            # ADDED ORDERS METRIC
+            c5.metric("Orders", f"{s_data['order_count']:,}")
             
             st.markdown("---")
             
@@ -496,7 +496,7 @@ if prompt := st.chat_input("Ask about your data..."):
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
             ads_txt = "\n".join([f"{a['name']}: {a['roas']}x ROAS (${a['spend']})" for a in m_data['gallery_ads'][:10]])
-            context_str = f"OVERVIEW:\nBlended MER: {ctx['blended_mer']:.2f}x\nNet Profit: ${ctx['total_net_profit']:,.2f}\nRevenue: ${s_data['total_sales']}\nAd Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\n\nTOP ADS:\n{ads_txt}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
+            context_str = f"OVERVIEW:\nBlended MER: {ctx['blended_mer']:.2f}x\nNet Profit: ${ctx['total_net_profit']:,.2f}\nRevenue: ${s_data['total_sales']}\nOrders: {s_data['order_count']}\nAd Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\n\nTOP ADS:\n{ads_txt}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
         
         history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
         final_prompt = f"You are a Senior Media Buyer. Use this data:\n{context_str}"
