@@ -17,22 +17,38 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# --- 2. MEMORY FUNCTIONS ---
+# REVERTED TO GPT-4o (Stable)
+AI_MODEL = "gpt-4o"
+
+# --- 2. MEMORY FUNCTIONS (FIXED SIGNATURE) ---
 def load_memory():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         df = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         if df.empty or "role" not in df.columns: return []
-        return df.to_dict("records")
+        records = df.to_dict("records")
+        # Parse suggestions if stored
+        for r in records:
+            if "|||" in str(r['content']):
+                parts = r['content'].split("|||")
+                r['content'] = parts[0]
+                try: r['suggestions'] = json.loads(parts[1])
+                except: r['suggestions'] = []
+        return records
     except Exception: return []
 
-def save_memory(role, content):
+# FIX: Added 'suggestions=None' to accept the 3rd argument
+def save_memory(role, content, suggestions=None):
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         try: existing_data = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         except Exception: existing_data = pd.DataFrame(columns=["timestamp", "role", "content"])
-        if isinstance(content, dict): content = json.dumps(content)
-        new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": content}])
+        
+        save_content = str(content)
+        if suggestions:
+            save_content = f"{save_content}|||{json.dumps(suggestions)}"
+            
+        new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": save_content}])
         updated_data = pd.concat([existing_data, new_row], ignore_index=True)
         conn.update(worksheet="ChatHistory", data=updated_data)
     except Exception: pass
@@ -152,7 +168,6 @@ def fetch_ad_creatives_batch(token, ad_ids):
                 for ad_id, val in data.items():
                     creative = val.get('creative', {})
                     img, link = None, None
-                    # Image Logic
                     try:
                         spec = creative.get('object_story_spec', {})
                         img = spec.get('link_data', {}).get('full_picture') or spec.get('link_data', {}).get('picture')
@@ -163,7 +178,6 @@ def fetch_ad_creatives_batch(token, ad_ids):
                         try: img = creative.get('asset_feed_spec', {}).get('images', [])[0].get('url')
                         except: pass
                     if not img: img = creative.get('image_url') or creative.get('thumbnail_url')
-                    # Link Logic
                     link = creative.get('instagram_permalink_url')
                     if not link:
                         pid = creative.get('effective_object_story_id')
@@ -241,7 +255,7 @@ def generate_briefing(ctx, s_data, m_data):
             "top_products": [p[0] for p in s_data['top_products']],
             "campaigns": m_data['campaign_df'].to_dict('records')
         }
-        system_prompt = """You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys: {"headline": "A short, punchy 1-sentence summary.", "wins": ["Bullet 1", "Bullet 2"], "warnings": ["Bullet 1", "Bullet 2"], "action_plan": "One clear strategic recommendation.", "suggested_questions": ["Question 1 (Short)", "Question 2 (Short)", "Question 3 (Short)"]} Do not include markdown formatting. Return RAW JSON only."""
+        system_prompt = """You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys: {"headline": "A short, punchy 1-sentence summary.", "wins": ["Bullet 1", "Bullet 2"], "warnings": ["Bullet 1", "Bullet 2"], "action_plan": "One clear strategic recommendation.", "suggested_questions": ["Question 1", "Question 2", "Question 3"]} Do not include markdown formatting. Return RAW JSON only."""
         response = client.chat.completions.create(model=AI_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload)}], response_format={"type": "json_object"})
         return json.loads(response.choices[0].message.content)
     except Exception: return {"headline": "Analysis Unavailable", "wins": [], "warnings": [], "action_plan": "Check API keys.", "suggested_questions": []}
@@ -311,20 +325,15 @@ def run_sync_logic():
                 }
                 st.session_state['context'] = ctx
                 
-                # GENERATE BRIEFING
+                # GENERATE BRIEFING (FIXED FORMAT)
                 briefing = generate_briefing(ctx, shop_data, meta_data)
                 
-                # FIX: FLATTEN HTML FOR BRIEFING
-                wins_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in briefing.get('wins', [])])
-                warn_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in briefing.get('warnings', [])])
-                
-                briefing_html = f"""<div class="briefing-card"><div class="briefing-head">⚡ DAILY INTELLIGENCE</div><div style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;">{briefing.get('headline')}</div><div style="margin-bottom: 10px;"><div style="color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WINS</div>{wins_html}</div><div style="margin-bottom: 10px;"><div style="color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WARNINGS</div>{warn_html}</div><div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;"><div style="color: #0A84FF; font-size: 12px; font-weight: 600;">RECOMMENDATION</div><div style="font-size: 13px; color: #ccc;">{briefing.get('action_plan')}</div></div></div>"""
-                
                 st.session_state.messages.append({
-                    "role": "assistant", "content": briefing_html, 
+                    "role": "assistant", 
+                    "content": json.dumps(briefing), # Store as JSON string so we can parse it later
                     "suggestions": briefing.get('suggested_questions', [])
                 })
-                save_memory("assistant", briefing_html, briefing.get('suggested_questions', []))
+                save_memory("assistant", json.dumps(briefing), briefing.get('suggested_questions', []))
                 
                 st.session_state.last_synced_dates = (s_d, e_d)
                 if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
@@ -353,8 +362,6 @@ st.markdown(f"""
     .user-row {{ justify-content: flex-end; }}
     .bot-row {{ justify-content: flex-start; }}
     div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
-    
-    /* GALLERY & LIST STYLES (Flattened HTML) */
     .ad-card {{ background-color: #111; border: 1px solid #222; border-radius: 12px; overflow: hidden; margin-bottom: 20px; transition: transform 0.2s; position: relative; display: flex; flex-direction: column; }}
     .ad-card:hover {{ border-color: #444; transform: translateY(-2px); z-index: 10; }}
     .ad-image-container {{ position: relative; width: 100%; height: 220px; background-color: #000; overflow: hidden; }}
@@ -461,16 +468,27 @@ with chat_col:
             if msg["role"] == "user":
                 st.markdown(f"""<div class="chat-row user-row"><div class="chat-bubble user-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
             else:
-                if "<div" in msg['content']: 
-                    st.markdown(msg['content'], unsafe_allow_html=True)
-                    if msg.get('suggestions'):
-                        cols = st.columns(len(msg['suggestions']))
-                        for idx, sug in enumerate(msg['suggestions']):
-                            if cols[idx].button(sug, key=f"sug_{i}_{idx}"):
-                                st.session_state.trigger_prompt = sug
-                                st.rerun()
-                else: 
+                # Detect Briefing JSON vs Normal Text
+                try:
+                    if "headline" in msg['content']:
+                        b = json.loads(msg['content'])
+                        wins_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in b.get('wins', [])])
+                        warn_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in b.get('warnings', [])])
+                        st.markdown(f"""<div class="briefing-card"><div class="briefing-head">⚡ DAILY INTELLIGENCE</div><div style="font-weight: 600; margin-bottom: 12px; color: #fff;">{b.get('headline')}</div><div style="margin-bottom: 10px;"><div style="color: #00E676; font-weight: 600; margin-bottom: 4px;">WINS</div>{wins_html}</div><div style="margin-bottom: 10px;"><div style="color: #FF3D00; font-weight: 600; margin-bottom: 4px;">WARNINGS</div>{warn_html}</div><div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;"><div style="color: #0A84FF; font-weight: 600;">RECOMMENDATION</div><div style="color: #ccc;">{b.get('action_plan')}</div></div></div>""", unsafe_allow_html=True)
+                    else:
+                        # Normal Text Message
+                         st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
+                except:
                     st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
+                
+                # Suggestions
+                if msg.get('suggestions'):
+                    cols = st.columns(len(msg['suggestions']))
+                    for idx, sug in enumerate(msg['suggestions']):
+                        if cols[idx].button(sug, key=f"sug_{i}_{idx}"):
+                            st.session_state.trigger_prompt = sug
+                            st.rerun()
+
         st.markdown('<div id="end-of-chat"></div>', unsafe_allow_html=True)
 
 if 'trigger_prompt' in st.session_state and st.session_state.trigger_prompt:
