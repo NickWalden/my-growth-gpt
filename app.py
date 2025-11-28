@@ -34,26 +34,16 @@ def save_memory(role, content):
         conn.update(worksheet="ChatHistory", data=updated_data)
     except Exception: pass
 
-# --- 3. DATA FETCHING (WITH REAL COGS) ---
+# --- 3. DATA FETCHING (DYNAMIC DATES) ---
 
 def get_product_costs(domain, token, variant_ids):
-    """
-    Fetches the actual Cost per Item from Shopify Inventory.
-    This requires 'read_inventory' scope.
-    """
-    if not variant_ids:
-        return {}
-        
-    cost_map = {} # {variant_id: cost}
-    
+    """Fetches real COGS from Shopify Inventory."""
+    if not variant_ids: return {}
+    cost_map = {}
     try:
-        # 1. We need to get InventoryItem IDs from Variants first
-        # Chunking IDs to avoid URL limit (50 at a time)
         chunks = [variant_ids[i:i + 50] for i in range(0, len(variant_ids), 50)]
-        
         inventory_item_ids = []
-        variant_to_inventory = {} # {variant_id: inventory_item_id}
-
+        variant_to_inventory = {}
         headers = {"X-Shopify-Access-Token": token}
 
         for chunk in chunks:
@@ -66,7 +56,6 @@ def get_product_costs(domain, token, variant_ids):
                     variant_to_inventory[v['id']] = v['inventory_item_id']
                     inventory_item_ids.append(v['inventory_item_id'])
 
-        # 2. Now fetch Costs from Inventory Items
         if inventory_item_ids:
             inv_chunks = [inventory_item_ids[i:i + 50] for i in range(0, len(inventory_item_ids), 50)]
             for chunk in inv_chunks:
@@ -76,38 +65,35 @@ def get_product_costs(domain, token, variant_ids):
                 if res.status_code == 200:
                     items = res.json().get('inventory_items', [])
                     inv_cost_map = {item['id']: float(item['cost'] or 0) for item in items}
-                    
-                    # Map back to Variant ID
                     for vid, inv_id in variant_to_inventory.items():
                         if inv_id in inv_cost_map:
                             cost_map[vid] = inv_cost_map[inv_id]
-                            
-    except Exception as e:
-        print(f"COGS Fetch Error: {e}")
-        
+    except Exception: pass
     return cost_map
 
-def fetch_shopify_data(domain, token, fallback_margin):
+def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
     try:
-        last_30 = (datetime.now() - timedelta(days=30)).isoformat()
-        url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&created_at_min={last_30}&limit=250"
+        # Convert dates to ISO format for Shopify
+        # created_at_min requires ISO 8601 (YYYY-MM-DDTHH:MM:SS)
+        start_iso = start_date.strftime('%Y-%m-%dT00:00:00')
+        end_iso = end_date.strftime('%Y-%m-%dT23:59:59')
+        
+        url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&created_at_min={start_iso}&created_at_max={end_iso}&limit=250"
         headers = {"X-Shopify-Access-Token": token}
         res = requests.get(url, headers=headers)
         
         if res.status_code == 200:
             orders = res.json().get('orders', [])
             
-            # Collect all Variant IDs to fetch costs
+            # Fetch Real Costs
             all_variant_ids = set()
             for o in orders:
                 for item in o.get('line_items', []):
                     if item.get('variant_id'):
                         all_variant_ids.add(item['variant_id'])
-            
-            # Fetch Real Costs
             real_costs = get_product_costs(domain, token, list(all_variant_ids))
             
-            daily_map = {} # {date: {'sales': 0, 'cogs': 0}}
+            daily_map = {}
             product_sales = {}
             total_revenue = 0
             total_cogs = 0
@@ -119,22 +105,12 @@ def fetch_shopify_data(domain, token, fallback_margin):
                 order_rev = float(o['total_price'])
                 order_cogs = 0
                 
-                # Calculate COGS for this order
                 for item in o.get('line_items', []):
                     vid = item.get('variant_id')
                     price = float(item['price'])
                     qty = item['quantity']
-                    
-                    # Use Real Cost if available, else use Fallback Margin
-                    if vid in real_costs and real_costs[vid] > 0:
-                        item_cost = real_costs[vid]
-                    else:
-                        # Fallback: Cost = Price * (1 - Margin)
-                        item_cost = price * (1 - fallback_margin)
-                    
+                    item_cost = real_costs[vid] if (vid in real_costs and real_costs[vid] > 0) else price * (1 - fallback_margin)
                     order_cogs += (item_cost * qty)
-                    
-                    # Product Breakdown
                     p_name = item['title']
                     product_sales[p_name] = product_sales.get(p_name, 0) + (price * qty)
 
@@ -143,7 +119,6 @@ def fetch_shopify_data(domain, token, fallback_margin):
                 total_revenue += order_rev
                 total_cogs += order_cogs
 
-            # Format Data
             daily_list = [{'date': k, 'sales': v['sales'], 'cogs': v['cogs']} for k, v in daily_map.items()]
             df_daily = pd.DataFrame(daily_list)
             if not df_daily.empty:
@@ -162,46 +137,34 @@ def fetch_shopify_data(domain, token, fallback_margin):
         else: return None, f"Shopify Error {res.status_code}: {res.text}"
     except Exception as e: return None, f"Shopify Crash: {e}"
 
-def fetch_meta_data(token, account_id):
+def fetch_meta_data(token, account_id, start_date, end_date):
     try:
         base_url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
         
-        # Calculate explicit dates to force "Today" to be included
-        today = datetime.now()
-        start_date = (today - timedelta(days=29)).strftime('%Y-%m-%d') # Last 30 days
-        end_date = today.strftime('%Y-%m-%d') # Today
+        # Dynamic Time Range
+        time_range = json.dumps({'since': start_date.strftime('%Y-%m-%d'), 'until': end_date.strftime('%Y-%m-%d')})
         
-        # Define the time range JSON
-        time_range = json.dumps({'since': start_date, 'until': end_date})
-        
-        # 1. Campaign Level (Increased limit to 100 to catch all campaigns)
+        # 1. Campaign Level
         cmp_params = {
-            'access_token': token, 
-            'time_range': time_range, 
-            'level': 'campaign', 
-            'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc',
-            'limit': 100 
+            'access_token': token, 'time_range': time_range, 'level': 'campaign',
+            'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc', 'limit': 100
         }
         cmp_res = requests.get(base_url, params=cmp_params)
         
-        # 2. Daily Spend (Explicitly asking for 50 rows to ensure we get all 30 days)
+        # 2. Daily Spend
         daily_params = {
-            'access_token': token, 
-            'time_range': time_range, 
-            'level': 'account', 
-            'time_increment': 1, 
-            'fields': 'spend,date_start',
-            'limit': 50 
+            'access_token': token, 'time_range': time_range, 'level': 'account',
+            'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100
         }
         daily_res = requests.get(base_url, params=daily_params)
         
-        # 3. Ad Level (For AI Context)
+        # 3. Ad Level (For AI Context - Last 7 days relative to end date to keep prompt small)
+        ad_start = (end_date - timedelta(days=7)).strftime('%Y-%m-%d')
+        ad_range = json.dumps({'since': ad_start, 'until': end_date.strftime('%Y-%m-%d')})
+        
         ad_params = {
-            'access_token': token, 
-            'date_preset': 'last_7d', # Keep this as preset for simplicity
-            'level': 'ad', 
-            'fields': 'ad_name,spend,ctr,cpm,action_values', 
-            'limit': 20
+            'access_token': token, 'time_range': ad_range, 'level': 'ad',
+            'fields': 'ad_name,spend,ctr,cpm,action_values', 'limit': 20
         }
         ad_res = requests.get(base_url, params=ad_params)
 
@@ -212,14 +175,11 @@ def fetch_meta_data(token, account_id):
             
             daily_spend_map = {}
             total_spend = 0
-            
             for d in daily_data:
-                # Ensure we parse the specific date Meta returned
                 daily_spend_map[d['date_start']] = float(d['spend'])
                 total_spend += float(d['spend'])
                 
             df_daily_spend = pd.DataFrame(list(daily_spend_map.items()), columns=['date', 'spend'])
-            
             if not df_daily_spend.empty:
                 df_daily_spend['date'] = pd.to_datetime(df_daily_spend['date'])
 
@@ -228,13 +188,7 @@ def fetch_meta_data(token, account_id):
                 spend = float(c.get('spend', 0))
                 actions = c.get('action_values', [])
                 sales_val = sum([float(a['value']) for a in actions if a['action_type'] == 'purchase']) if actions else 0
-                campaigns.append({
-                    "Campaign": c.get('campaign_name'),
-                    "Spend": spend,
-                    "Sales": sales_val,
-                    "ROAS": round(sales_val/spend, 2) if spend>0 else 0,
-                    "CTR": float(c.get('ctr', 0))
-                })
+                campaigns.append({"Campaign": c.get('campaign_name'), "Spend": spend, "Sales": sales_val, "ROAS": round(sales_val/spend, 2) if spend>0 else 0, "CTR": float(c.get('ctr', 0))})
             
             top_ads = []
             for a in ad_data:
@@ -251,68 +205,84 @@ def fetch_meta_data(token, account_id):
                 "total_spend": total_spend,
                 "top_ads_list": top_ads
             }, None
-        else: 
-            return None, f"Meta Error: {daily_res.text}" # Changed to daily_res to debug this specific issue
+        else: return None, f"Meta Error: {daily_res.text}"
     except Exception as e: return None, f"Meta Crash: {e}"
 
-# --- 4. APP STATE ---
+# --- 4. APP STATE & CONTROLS ---
+
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
 if 'logs' not in st.session_state: st.session_state.logs = []
 
-# --- 5. SIDEBAR ---
 with st.sidebar:
     st.markdown("### ⚙️ Settings")
     
+    # 1. DATE PICKER
+    st.caption("Data Period")
+    
+    # Default to last 30 days
+    default_start = datetime.now() - timedelta(days=29)
+    default_end = datetime.now()
+    
+    date_range = st.date_input(
+        "Select Range",
+        value=(default_start, default_end),
+        max_value=datetime.now()
+    )
+    
+    st.divider()
+    
+    # 2. UI CONTROLS
     chat_width_pct = st.slider("Chat Width", 20, 60, 35, 5, format="%d%%")
     font_size = st.slider("Text Size", 12, 24, 14, 1, format="%dpx")
-    
-    st.markdown("---")
-    st.caption("Fallback Margin (If Shopify COGS missing)")
-    margin_pct = st.slider("Margin %", 10, 90, 60, 5, format="%d%%") / 100.0
+    margin_pct = st.slider("Margin % (Fallback)", 10, 90, 60, 5, format="%d%%") / 100.0
     
     st.divider()
     
     if st.button("🔄 Sync Data", type="primary", use_container_width=True):
-        with st.spinner("Syncing..."):
-            st.session_state.logs = [] 
-            try:
-                s_domain, s_token = st.secrets["SHOPIFY_DOMAIN"], st.secrets["SHOPIFY_TOKEN"]
-                m_token, m_id = st.secrets["META_TOKEN"], st.secrets["META_ACCOUNT_ID"]
-                
-                shop_data, s_err = fetch_shopify_data(s_domain, s_token, margin_pct)
-                meta_data, m_err = fetch_meta_data(m_token, m_id)
-                
-                if s_err: st.session_state.logs.append(s_err)
-                if m_err: st.session_state.logs.append(m_err)
-
-                if shop_data and meta_data:
-                    # --- TRUE PROFIT CALCULATION ---
-                    df_s = shop_data['daily_df']
-                    df_m = meta_data['daily_spend_df']
+        if len(date_range) != 2:
+            st.error("Please select a valid start and end date.")
+        else:
+            start_d, end_d = date_range
+            
+            with st.spinner("Syncing..."):
+                st.session_state.logs = [] 
+                try:
+                    s_domain, s_token = st.secrets["SHOPIFY_DOMAIN"], st.secrets["SHOPIFY_TOKEN"]
+                    m_token, m_id = st.secrets["META_TOKEN"], st.secrets["META_ACCOUNT_ID"]
                     
-                    if not df_s.empty and not df_m.empty:
-                        df_merged = pd.merge(df_s, df_m, on='date', how='outer').fillna(0)
-                        
-                        # Net Profit = Revenue - COGS - Ad Spend
-                        df_merged['gross_profit'] = df_merged['sales'] - df_merged['cogs']
-                        df_merged['net_profit'] = df_merged['gross_profit'] - df_merged['spend']
-                        df_merged = df_merged.sort_values('date')
-                        
-                        total_net_profit = df_merged['net_profit'].sum()
-                    else:
-                        df_merged = pd.DataFrame()
-                        total_net_profit = 0
+                    # Pass dates to fetch functions
+                    shop_data, s_err = fetch_shopify_data(s_domain, s_token, margin_pct, start_d, end_d)
+                    meta_data, m_err = fetch_meta_data(m_token, m_id, start_d, end_d)
+                    
+                    if s_err: st.session_state.logs.append(s_err)
+                    if m_err: st.session_state.logs.append(m_err)
 
-                    st.session_state['context'] = {
-                        "shopify": shop_data,
-                        "meta": meta_data,
-                        "profit_df": df_merged,
-                        "total_net_profit": total_net_profit,
-                        "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
-                    }
-                    if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
-                else: st.toast("Sync Failed", icon="⚠️")
-            except Exception as e: st.session_state.logs.append(f"Config Error: {e}")
+                    if shop_data and meta_data:
+                        # --- TRUE PROFIT CALCULATION ---
+                        df_s = shop_data['daily_df']
+                        df_m = meta_data['daily_spend_df']
+                        
+                        if not df_s.empty and not df_m.empty:
+                            df_merged = pd.merge(df_s, df_m, on='date', how='outer').fillna(0)
+                            df_merged['gross_profit'] = df_merged['sales'] - df_merged['cogs']
+                            df_merged['net_profit'] = df_merged['gross_profit'] - df_merged['spend']
+                            df_merged = df_merged.sort_values('date')
+                            total_net_profit = df_merged['net_profit'].sum()
+                        else:
+                            df_merged = pd.DataFrame()
+                            total_net_profit = 0
+
+                        st.session_state['context'] = {
+                            "shopify": shop_data,
+                            "meta": meta_data,
+                            "profit_df": df_merged,
+                            "total_net_profit": total_net_profit,
+                            "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0,
+                            "date_range": f"{start_d} to {end_d}"
+                        }
+                        if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
+                    else: st.toast("Sync Failed", icon="⚠️")
+                except Exception as e: st.session_state.logs.append(f"Config Error: {e}")
 
     if st.session_state.logs:
         with st.expander(f"⚠️ Logs ({len(st.session_state.logs)})"):
@@ -335,17 +305,16 @@ st.markdown(f"""
         overflow: hidden !important; 
     }}
     
-    /* --- FIX: HEADER VISIBLE BUT TRANSPARENT --- */
+    /* HEADER FIX: Visible but transparent */
     header[data-testid="stHeader"] {{
         background-color: transparent !important;
         z-index: 999;
     }}
-    /* Hide colored strip */
     .stApp > header {{ background-color: transparent; }}
     
     .block-container {{
         max-width: 100%;
-        padding: 4rem 1rem 0 1rem; /* Added top padding for header space */
+        padding: 4rem 1rem 0 1rem; 
         height: 100vh;
         overflow: hidden !important;
     }}
@@ -392,16 +361,15 @@ with dash_col:
             
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
-            c2.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net (Sales - COGS - Ads)")
+            c2.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
             c3.metric("ROAS", f"{ctx['roas']:.2f}x")
             
-            # Determine Margin Source
             margin_source = "Real COGS" if s_data['total_cogs'] > 0 else f"Est. {margin_pct*100}%"
             c4.metric("COGS Source", margin_source)
 
             st.markdown("---")
             
-            # --- PROFIT CHART ---
+            # PROFIT CHART
             st.subheader("Daily Net Profit")
             df = ctx['profit_df']
             if not df.empty:
@@ -415,7 +383,7 @@ with dash_col:
             st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
             st.markdown("<br><br><br>", unsafe_allow_html=True)
         else:
-            st.info("👈 Sync Data from the sidebar to begin.")
+            st.info("👈 Select a Date Range and Sync Data to begin.")
 
 # --- RIGHT: CHAT ---
 with chat_col:
@@ -442,6 +410,8 @@ if prompt := st.chat_input("Ask about your data..."):
             top_ads = "\n".join(m_data['top_ads_list'])
             
             context_str = f"""
+            DATE RANGE: {ctx.get('date_range', 'Last 30 Days')}
+            
             OVERVIEW:
             - Net Profit: ${ctx['total_net_profit']:,.2f}
             - Revenue: ${s_data['total_sales']}
