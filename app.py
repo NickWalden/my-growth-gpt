@@ -66,9 +66,11 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
     try:
         start_iso = start_date.strftime('%Y-%m-%dT00:00:00')
         end_iso = end_date.strftime('%Y-%m-%dT23:59:59')
-        url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&created_at_min={start_iso}&created_at_max={end_iso}&limit=250"
+        # UPGRADE: Request 'customer' field to check order counts
+        url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&created_at_min={start_iso}&created_at_max={end_iso}&limit=250&fields=id,created_at,total_price,line_items,customer"
         headers = {"X-Shopify-Access-Token": token}
         res = requests.get(url, headers=headers)
+        
         if res.status_code == 200:
             orders = res.json().get('orders', [])
             all_vids = set()
@@ -81,11 +83,40 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
             prod_sales = {}
             total_rev = 0
             total_cogs = 0
+            
+            # GROWTH METRICS
+            new_cust_rev = 0
+            ret_cust_rev = 0
+            new_cust_orders = 0
+            
             for o in orders:
                 date = o['created_at'][:10]
-                if date not in daily_map: daily_map[date] = {'sales': 0, 'cogs': 0}
+                if date not in daily_map: 
+                    daily_map[date] = {'sales': 0, 'cogs': 0, 'new_sales': 0, 'ret_sales': 0}
+                
                 rev = float(o['total_price'])
                 cogs = 0
+                
+                # Check New vs Returning
+                # Logic: If customer exists and orders_count is 1, it's New.
+                is_new = False
+                if o.get('customer'):
+                    # Some API versions return 'orders_count', others rely on logic
+                    # Simple check: orders_count == 1 means first order
+                    cnt = o['customer'].get('orders_count', 1) 
+                    if cnt == 1:
+                        is_new = True
+                        new_cust_rev += rev
+                        new_cust_orders += 1
+                        daily_map[date]['new_sales'] += rev
+                    else:
+                        ret_cust_rev += rev
+                        daily_map[date]['ret_sales'] += rev
+                else:
+                    # Guest/Unknown -> Treat as new for safety or split? Treat as new.
+                    new_cust_rev += rev
+                    daily_map[date]['new_sales'] += rev
+
                 for i in o.get('line_items', []):
                     vid = i.get('variant_id')
                     price = float(i['price'])
@@ -93,22 +124,33 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
                     cost = real_costs.get(vid, price * (1 - fallback_margin))
                     cogs += (cost * qty)
                     prod_sales[i['title']] = prod_sales.get(i['title'], 0) + (price * qty)
+                
                 daily_map[date]['sales'] += rev
                 daily_map[date]['cogs'] += cogs
                 total_rev += rev
                 total_cogs += cogs
 
-            df_daily = pd.DataFrame([{'date': k, 'sales': v['sales'], 'cogs': v['cogs']} for k, v in daily_map.items()])
+            df_daily = pd.DataFrame([
+                {'date': k, 'sales': v['sales'], 'cogs': v['cogs'], 
+                 'new_sales': v['new_sales'], 'ret_sales': v['ret_sales']} 
+                for k, v in daily_map.items()
+            ])
+            
             if not df_daily.empty:
                 df_daily['date'] = pd.to_datetime(df_daily['date'])
                 df_daily = df_daily.sort_values('date')
+                
             return {
-                "daily_df": df_daily, "total_sales": total_rev, "total_cogs": total_cogs,
+                "daily_df": df_daily, 
+                "total_sales": total_rev, 
+                "total_cogs": total_cogs,
+                "new_cust_rev": new_cust_rev,
+                "ret_cust_rev": ret_cust_rev,
+                "new_orders": new_cust_orders,
                 "top_products": sorted(prod_sales.items(), key=lambda x: x[1], reverse=True)[:5],
-                "aov": total_rev / len(orders) if len(orders) > 0 else 0,
-                "order_count": len(orders) # Added Order Count
+                "aov": total_rev / len(orders) if len(orders) > 0 else 0
             }, None
-        else: return None, f"Shopify Error {res.status_code}"
+        else: return None, f"Shopify Error {res.status_code}: {res.text}"
     except Exception as e: return None, f"Shopify Crash: {e}"
 
 def fetch_ad_creatives_batch(token, ad_ids):
@@ -186,7 +228,6 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         
         gallery_ads = []
         ad_ids_to_fetch = []
-        
         for a in ad_data:
             spend = float(a.get('spend', 0))
             if spend > 0 or int(a.get('impressions', 0)) > 10:
@@ -227,41 +268,29 @@ if 'messages' not in st.session_state: st.session_state.messages = load_memory()
 if 'logs' not in st.session_state: st.session_state.logs = []
 if 'last_synced_dates' not in st.session_state: st.session_state.last_synced_dates = None
 
-# --- 5. TOP HEADER (Date Picker) ---
+# --- 5. TOP HEADER ---
 header_col1, header_col2 = st.columns([5, 2], gap="medium")
-
 with header_col1:
     st.markdown("# Growth OS")
-
 with header_col2:
-    preset = st.selectbox(
-        "Range Preset", 
-        ["Last 7 Days", "Last 30 Days", "This Month", "Last Month", "Custom"],
-        index=1,
-        label_visibility="collapsed"
-    )
-    
+    preset = st.selectbox("Range Preset", ["Last 7 Days", "Last 30 Days", "This Month", "Last Month", "Custom"], index=1, label_visibility="collapsed")
     today = datetime.now().date()
     if preset == "Last 7 Days": s_d, e_d = today - timedelta(days=7), today
     elif preset == "Last 30 Days": s_d, e_d = today - timedelta(days=30), today
     elif preset == "This Month": s_d, e_d = today.replace(day=1), today
-    elif preset == "Last Month": 
-        first = today.replace(day=1); e_d = first - timedelta(days=1); s_d = e_d.replace(day=1)
-    else: 
-        s_d, e_d = today - timedelta(days=30), today
-
+    elif preset == "Last Month": first = today.replace(day=1); e_d = first - timedelta(days=1); s_d = e_d.replace(day=1)
+    else: s_d, e_d = today - timedelta(days=30), today
     date_range = st.date_input("Custom Range", value=(s_d, e_d), label_visibility="collapsed")
     if len(date_range) == 2: s_d, e_d = date_range
 
-# --- 6. SIDEBAR (Config Only) ---
+# --- 6. SIDEBAR ---
 with st.sidebar:
     st.markdown("### ⚙️ Configuration")
     chat_width_pct = st.slider("Chat Width", 20, 60, 35, 5, format="%d%%")
     font_size = st.slider("Chat Text Size", 12, 24, 14, 1, format="%dpx")
     margin_pct = st.slider("Margin % (Fallback)", 10, 90, 60, 5, format="%d%%") / 100.0
     st.divider()
-    if st.button("🔄 Force Sync", type="secondary", use_container_width=True):
-        st.session_state.last_synced_dates = None; st.rerun()
+    if st.button("🔄 Force Sync", type="secondary", use_container_width=True): st.session_state.last_synced_dates = None; st.rerun()
     if st.session_state.logs:
         with st.expander(f"⚠️ Logs ({len(st.session_state.logs)})"):
             for err in st.session_state.logs: st.error(err)
@@ -289,11 +318,16 @@ def run_sync_logic():
                     df_merged = df_merged.sort_values('date')
                     total_net_profit = df_merged['net_profit'].sum()
                 else: df_merged = pd.DataFrame(); total_net_profit = 0
+                
                 blended_mer = shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
+                # GROWTH METRIC: nCPA (New Customer Cost Per Acquisition)
+                # nCPA = Total Ad Spend / New Orders
+                ncpa = meta_data['total_spend'] / shop_data['new_orders'] if shop_data['new_orders'] > 0 else 0
+
                 st.session_state['context'] = {
                     "shopify": shop_data, "meta": meta_data, "profit_df": df_merged,
                     "total_net_profit": total_net_profit, "date_range": f"{s_d} to {e_d}",
-                    "blended_mer": blended_mer,
+                    "blended_mer": blended_mer, "ncpa": ncpa,
                     "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
                 }
                 st.session_state.last_synced_dates = (s_d, e_d)
@@ -308,15 +342,12 @@ st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; background-color: #000; color: #fff; height: 100vh; overflow: hidden !important; }}
-    
     header[data-testid="stHeader"] {{ background-color: transparent !important; z-index: 999; pointer-events: none; }}
     header[data-testid="stHeader"] button {{ pointer-events: auto; }}
     .stApp > header {{ background-color: transparent; }}
-    
     .block-container {{ max-width: 100%; padding: 2rem 1rem 0 1rem; height: 100vh; overflow: hidden !important; }}
     div[data-testid="column"] {{ height: 88vh; overflow-y: auto; overflow-x: hidden; display: block; }}
     div[data-testid="column"]:nth-of-type(2) > div {{ padding-bottom: 150px !important; }}
-    
     [data-testid="stChatInput"] {{ position: fixed !important; bottom: 0 !important; right: 1.5rem !important; left: auto !important; width: {chat_width_pct-2}% !important; min-width: 300px; background-color: #111 !important; z-index: 9999 !important; border-top: 1px solid #333; padding-top: 15px !important; padding-bottom: 25px !important; }}
     .chat-bubble, .chat-bubble * {{ font-size: {font_size}px !important; line-height: 1.5; }}
     .chat-bubble {{ padding: 12px 16px; border-radius: 18px; max-width: 85%; position: relative; word-wrap: break-word; margin-bottom: 4px; display: inline-block; }}
@@ -369,27 +400,34 @@ with dash_col:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
             
-            # --- 5 COLUMN METRICS (UPDATED) ---
+            # --- 5 METRICS ROW (ADDED nCPA) ---
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
             c2.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
             c3.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
-            c4.metric("FB ROAS", f"{ctx['roas']:.2f}x")
-            # ADDED ORDERS METRIC
-            c5.metric("Orders", f"{s_data['order_count']:,}")
+            c4.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust Cost", delta_color="inverse")
+            c5.metric("FB ROAS", f"{ctx['roas']:.2f}x")
             
             st.markdown("---")
             
-            tab1, tab2, tab3, tab4 = st.tabs(["Blended Efficiency", "Profit Chart", "Creative Gallery", "Campaigns"])
+            tab1, tab2, tab3, tab4 = st.tabs(["Growth (New vs Ret)", "Profit Chart", "Creative Gallery", "Campaigns"])
             
             with tab1:
-                df = ctx['profit_df']
+                # --- NEW GROWTH CHART (STACKED) ---
+                df = ctx['shopify']['daily_df']
                 if not df.empty:
                     fig = go.Figure()
-                    fig.add_trace(go.Bar(x=df['date'], y=df['sales'], name='Revenue', marker_color='#007AFF', opacity=0.4))
-                    fig.add_trace(go.Scatter(x=df['date'], y=df['mer'], name='MER', yaxis='y2', line=dict(color='#00E676', width=3)))
-                    fig.add_hline(y=3.0, line_dash="dash", line_color="#555", annotation_text="Target (3.0)", annotation_position="bottom right")
-                    fig.update_layout(template="plotly_dark", height=350, margin=dict(l=0, r=0, t=30, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', hovermode="x unified", legend=dict(orientation="h", y=1.1), yaxis=dict(title="Revenue", showgrid=True, gridcolor="#333"), yaxis2=dict(title="MER", overlaying='y', side='right', showgrid=False))
+                    # Stacked Bars: New vs Returning
+                    fig.add_trace(go.Bar(x=df['date'], y=df['new_sales'], name='New Customer Rev', marker_color='#007AFF'))
+                    fig.add_trace(go.Bar(x=df['date'], y=df['ret_sales'], name='Returning Rev', marker_color='#BF5AF2'))
+                    
+                    fig.update_layout(
+                        barmode='stack', # This stacks them
+                        template="plotly_dark", height=350, 
+                        margin=dict(l=0, r=0, t=30, b=0), 
+                        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
+                        hovermode="x unified", legend=dict(orientation="h", y=1.1)
+                    )
                     st.plotly_chart(fig, use_container_width=True)
             
             with tab2:
@@ -496,7 +534,7 @@ if prompt := st.chat_input("Ask about your data..."):
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
             ads_txt = "\n".join([f"{a['name']}: {a['roas']}x ROAS (${a['spend']})" for a in m_data['gallery_ads'][:10]])
-            context_str = f"OVERVIEW:\nBlended MER: {ctx['blended_mer']:.2f}x\nNet Profit: ${ctx['total_net_profit']:,.2f}\nRevenue: ${s_data['total_sales']}\nOrders: {s_data['order_count']}\nAd Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\n\nTOP ADS:\n{ads_txt}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
+            context_str = f"OVERVIEW:\nBlended MER: {ctx['blended_mer']:.2f}x\nnCPA (New Cust Cost): ${ctx['ncpa']:.2f}\nNet Profit: ${ctx['total_net_profit']:,.2f}\nRevenue: ${s_data['total_sales']}\nAd Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\n\nNEW vs RETURNING:\nNew Rev: ${s_data['new_cust_rev']}\nReturning Rev: ${s_data['ret_cust_rev']}\n\nTOP ADS:\n{ads_txt}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
         
         history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
         final_prompt = f"You are a Senior Media Buyer. Use this data:\n{context_str}"
