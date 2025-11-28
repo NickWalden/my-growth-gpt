@@ -77,18 +77,15 @@ if 'messages' not in st.session_state: st.session_state.messages = load_memory()
 if 'logs' not in st.session_state: st.session_state.logs = []
 
 # ==========================================
-# ⬅️ LEFT SIDEBAR: SETTINGS & CONTROLS
+# ⬅️ LEFT SIDEBAR: SETTINGS
 # ==========================================
 with st.sidebar:
     st.markdown("### ⚙️ Console Settings")
-    
-    # 1. UI CONTROLS
     chat_width_pct = st.slider("Chat Drawer Width", min_value=20, max_value=50, value=30, step=5, format="%d%%")
     font_size = st.slider("Chat Text Size", min_value=12, max_value=20, value=14, step=1, format="%dpx")
     
     st.divider()
     
-    # 2. DATA SYNC
     if st.button("🔄 Sync Data", type="primary", use_container_width=True):
         with st.spinner("Syncing..."):
             st.session_state.logs = [] 
@@ -121,8 +118,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# --- 5. DYNAMIC CSS FOR LAYOUT ---
-# We inject CSS variables based on the sliders above
+# --- 5. SPLIT SCREEN SCROLLING CSS ---
 st.markdown(f"""
 <style>
     /* GLOBAL RESET */
@@ -133,24 +129,43 @@ st.markdown(f"""
         color: #ffffff;
     }}
 
-    /* HIDE DEFAULT HEADER */
+    /* HIDE HEADER */
     header[data-testid="stHeader"] {{ background-color: transparent; }}
     
-    /* REMOVE PADDING TO USE FULL SCREEN */
+    /* 1. LOCK MAIN PAGE SCROLL */
+    /* This stops the whole page from moving. We only scroll the columns. */
     .block-container {{
-        padding-top: 1rem;
-        padding-bottom: 5rem;
         max-width: 100%;
+        padding-top: 2rem;
+        padding-bottom: 0rem;
+        height: 100vh;
+        overflow: hidden !important;
     }}
 
-    /* --- CHAT INPUT POSITIONING (THE MAGIC) --- */
-    /* Forces the input box to the bottom right, matching the selected width */
+    /* 2. ENABLE INDEPENDENT COLUMN SCROLLING */
+    /* We target the specific columns using the ID markers we inject below */
+    
+    div[data-testid="column"]:has(#dashboard-marker) {{
+        height: calc(100vh - 50px);
+        overflow-y: auto;
+        padding-bottom: 50px;
+        padding-right: 10px; /* Avoid scrollbar covering content */
+    }}
+    
+    div[data-testid="column"]:has(#chat-marker) {{
+        height: calc(100vh - 50px);
+        overflow-y: auto;
+        padding-bottom: 150px; /* Extra space for sticky input */
+        padding-right: 10px;
+    }}
+
+    /* CHAT INPUT POSITIONING */
     [data-testid="stChatInput"] {{
         position: fixed !important;
         bottom: 0 !important;
         right: 0 !important;
-        left: auto !important; /* Release left anchor */
-        width: {chat_width_pct}% !important; /* Dynamic Width */
+        left: auto !important;
+        width: {chat_width_pct}% !important;
         padding: 20px !important;
         background-color: #111111 !important;
         z-index: 9999 !important;
@@ -161,37 +176,18 @@ st.markdown(f"""
     .chat-row {{ display: flex; margin-bottom: 12px; width: 100%; }}
     .user-row {{ justify-content: flex-end; }}
     .bot-row {{ justify-content: flex-start; }}
-
     .chat-bubble {{
         padding: 10px 14px;
         border-radius: 16px;
         max-width: 85%;
-        font-size: {font_size}px; /* Dynamic Font Size */
+        font-size: {font_size}px;
         line-height: 1.4;
         position: relative;
         word-wrap: break-word;
     }}
-
-    .user-bubble {{
-        background-color: #007AFF;
-        color: white;
-        border-bottom-right-radius: 2px;
-    }}
-
-    .bot-bubble {{
-        background-color: #252525;
-        color: #E5E5EA;
-        border: 1px solid #333;
-        border-bottom-left-radius: 2px;
-    }}
-    
-    /* Metrics Styling */
-    div[data-testid="stMetric"] {{
-        background-color: #1C1C1E;
-        border: 1px solid #2C2C2E;
-        padding: 15px;
-        border-radius: 12px;
-    }}
+    .user-bubble {{ background-color: #007AFF; color: white; border-bottom-right-radius: 2px; }}
+    .bot-bubble {{ background-color: #252525; color: #E5E5EA; border: 1px solid #333; border-bottom-left-radius: 2px; }}
+    div[data-testid="stMetric"] {{ background-color: #1C1C1E; border: 1px solid #2C2C2E; padding: 15px; border-radius: 12px; }}
 
 </style>
 """, unsafe_allow_html=True)
@@ -200,14 +196,15 @@ st.markdown(f"""
 # 🖥️ MAIN SPLIT SCREEN LAYOUT
 # ==========================================
 
-# Create two columns based on user selection
-# The gap="large" adds a nice separation
 dash_col, chat_col = st.columns([100-chat_width_pct, chat_width_pct], gap="medium")
 
 # ------------------------------------------
 # 📊 LEFT COLUMN: DASHBOARD
 # ------------------------------------------
 with dash_col:
+    # INJECT MARKER FOR CSS SCROLL TARGETING
+    st.markdown('<div id="dashboard-marker"></div>', unsafe_allow_html=True)
+    
     st.markdown("## Overview")
     
     if 'context' in st.session_state:
@@ -244,6 +241,8 @@ with dash_col:
                 hide_index=True,
                 use_container_width=True
             )
+            # Add extra space at bottom of dashboard so you can scroll to last item
+            st.markdown("<br><br><br>", unsafe_allow_html=True)
     else:
         st.info("👈 Please Sync Data from the sidebar.")
 
@@ -251,11 +250,10 @@ with dash_col:
 # 💬 RIGHT COLUMN: CHAT DRAWER
 # ------------------------------------------
 with chat_col:
-    st.markdown("### AI Strategist")
+    # INJECT MARKER FOR CSS SCROLL TARGETING
+    st.markdown('<div id="chat-marker"></div>', unsafe_allow_html=True)
     
-    # Chat History Container
-    # We add a container with a fixed height simulation or just let it flow
-    # Since we are in a column, it will naturally stack.
+    st.markdown("### AI Strategist")
     
     for msg in st.session_state.messages:
         if msg["role"] == "user":
@@ -271,25 +269,19 @@ with chat_col:
             </div>
             """, unsafe_allow_html=True)
             
-    # Spacer to ensure content doesn't get hidden behind the sticky input
-    st.markdown("<div style='height: 100px;'></div>", unsafe_allow_html=True)
+    # Spacer to push content up from sticky input
+    st.markdown("<div style='height: 150px;'></div>", unsafe_allow_html=True)
 
 # ------------------------------------------
-# ⌨️ GLOBAL CHAT INPUT (Rendered via CSS to Right)
+# ⌨️ GLOBAL CHAT INPUT
 # ------------------------------------------
 if prompt := st.chat_input("Ask about your data..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_memory("user", prompt)
     
-    # Rerun immediately to show user message
-    # Then we process. Since we are using columns, visual "Thinking" blocks
-    # are tricky to place inside the column during a rerun.
-    # We will use a Spinner instead for stability in this layout.
-    
     try:
         client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
         
-        # Simplified Context Building
         context_str = ""
         if 'context' in st.session_state:
             cmp_sum = st.session_state['context']['campaigns'].to_string(index=False)
