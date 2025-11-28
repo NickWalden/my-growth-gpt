@@ -31,8 +31,8 @@ def save_memory(role, content):
         conn = st.connection("gsheets", type=GSheetsConnection)
         try: existing_data = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         except Exception: existing_data = pd.DataFrame(columns=["timestamp", "role", "content"])
-        # Handle JSON content for assistant (if it's the briefing)
-        if isinstance(content, dict): content = json.dumps(content)
+        # Handle JSON content or non-string
+        if not isinstance(content, str): content = str(content)
         new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": content}])
         updated_data = pd.concat([existing_data, new_row], ignore_index=True)
         conn.update(worksheet="ChatHistory", data=updated_data)
@@ -153,6 +153,7 @@ def fetch_ad_creatives_batch(token, ad_ids):
                 for ad_id, val in data.items():
                     creative = val.get('creative', {})
                     img, link = None, None
+                    # Image Logic
                     try:
                         spec = creative.get('object_story_spec', {})
                         img = spec.get('link_data', {}).get('full_picture') or spec.get('link_data', {}).get('picture')
@@ -163,6 +164,7 @@ def fetch_ad_creatives_batch(token, ad_ids):
                         try: img = creative.get('asset_feed_spec', {}).get('images', [])[0].get('url')
                         except: pass
                     if not img: img = creative.get('image_url') or creative.get('thumbnail_url')
+                    # Link Logic
                     link = creative.get('instagram_permalink_url')
                     if not link:
                         pid = creative.get('effective_object_story_id')
@@ -237,13 +239,12 @@ def generate_briefing(ctx, s_data, m_data):
             "campaigns": m_data['campaign_df'].to_dict('records')
         }
         system_prompt = """You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys: {"headline": "A short, punchy 1-sentence summary.", "wins": ["Bullet 1", "Bullet 2"], "warnings": ["Bullet 1", "Bullet 2"], "action_plan": "One clear strategic recommendation."} Do not include markdown formatting. Return RAW JSON only."""
-        response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload)}], response_format={"type": "json_object"})
+        response = client.chat.completions.create(model="gpt-5.1", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload)}], response_format={"type": "json_object"})
         return json.loads(response.choices[0].message.content)
     except Exception: return {"headline": "Analysis Unavailable", "wins": [], "warnings": [], "action_plan": "Check API keys."}
 
 # --- 5. APP STATE ---
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
-if 'briefing' not in st.session_state: st.session_state.briefing = None
 if 'logs' not in st.session_state: st.session_state.logs = []
 if 'last_synced_dates' not in st.session_state: st.session_state.last_synced_dates = None
 
@@ -305,7 +306,37 @@ def run_sync_logic():
                     "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
                 }
                 st.session_state['context'] = ctx
-                st.session_state.briefing = generate_briefing(ctx, shop_data, meta_data)
+                
+                # GENERATE BRIEFING & ADD TO CHAT
+                briefing = generate_briefing(ctx, shop_data, meta_data)
+                
+                # Create HTML String for Chat
+                wins_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in briefing.get('wins', [])])
+                warn_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in briefing.get('warnings', [])])
+                
+                briefing_html = f"""
+                <div class="briefing-card">
+                    <div class="briefing-head">⚡ DAILY INTELLIGENCE</div>
+                    <div style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;">{briefing.get('headline')}</div>
+                    <div style="margin-bottom: 10px;">
+                        <div style="color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WINS</div>
+                        {wins_html}
+                    </div>
+                    <div style="margin-bottom: 10px;">
+                        <div style="color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WARNINGS</div>
+                        {warn_html}
+                    </div>
+                    <div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;">
+                        <div style="color: #0A84FF; font-size: 12px; font-weight: 600;">RECOMMENDATION</div>
+                        <div style="font-size: 13px; color: #ccc;">{briefing.get('action_plan')}</div>
+                    </div>
+                </div>
+                """
+                
+                # Append to Chat History
+                st.session_state.messages.append({"role": "assistant", "content": briefing_html})
+                save_memory("assistant", briefing_html)
+                
                 st.session_state.last_synced_dates = (s_d, e_d)
                 if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
             else: st.toast("Sync Failed", icon="⚠️")
@@ -374,6 +405,7 @@ with dash_col:
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
+            
             c1, c2, c3, c4, c5, c6 = st.columns(6)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
             c2.metric("Orders", f"{s_data['order_count']:,}")
@@ -433,36 +465,13 @@ with dash_col:
 
 with chat_col:
     with st.container(height=780, border=False):
-        if 'briefing' in st.session_state and st.session_state.briefing:
-            b = st.session_state.briefing
-            # FIX: FLATTEN HTML STRINGS to prevent markdown code blocks
-            wins_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in b.get('wins', [])])
-            warn_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in b.get('warnings', [])])
-            
-            st.markdown(f"""
-            <div class="briefing-card">
-                <div class="briefing-head">⚡ DAILY INTELLIGENCE</div>
-                <div style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;">{b.get('headline')}</div>
-                <div style="margin-bottom: 10px;">
-                    <div style="color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WINS</div>
-                    {wins_html}
-                </div>
-                <div style="margin-bottom: 10px;">
-                    <div style="color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WARNINGS</div>
-                    {warn_html}
-                </div>
-                <div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;">
-                    <div style="color: #0A84FF; font-size: 12px; font-weight: 600;">RECOMMENDATION</div>
-                    <div style="font-size: 13px; color: #ccc;">{b.get('action_plan')}</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
         for msg in st.session_state.messages:
             if msg["role"] == "user":
                 st.markdown(f"""<div class="chat-row user-row"><div class="chat-bubble user-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
             else:
-                st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
+                # Check if message content is raw HTML (like the briefing)
+                if "<div" in msg['content']: st.markdown(msg['content'], unsafe_allow_html=True)
+                else: st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
         st.markdown("<br><br><br>", unsafe_allow_html=True)
 
 if prompt := st.chat_input("Ask about your data..."):
