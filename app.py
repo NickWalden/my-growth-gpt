@@ -111,18 +111,27 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
     except Exception as e: return None, f"Shopify Crash: {e}"
 
 def get_creative_images(token, creative_ids):
+    """Robust image fetcher that checks multiple fields."""
     if not creative_ids: return {}
     url_map = {}
     try:
-        # Limit to 50 IDs at a time
         ids_str = ",".join(creative_ids[:50])
-        # We explicitly ask for the image URL or the video thumbnail URL
-        url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=thumbnail_url,image_url,name&access_token={token}"
+        # We ask for object_story_spec to handle "Boosted Posts" or dynamic ads
+        url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=thumbnail_url,image_url,name,object_story_spec&access_token={token}"
         res = requests.get(url)
         if res.status_code == 200:
             data = res.json()
             for cid, val in data.items():
-                url_map[cid] = val.get('thumbnail_url') or val.get('image_url')
+                # 1. Try direct thumbnail
+                img = val.get('thumbnail_url')
+                # 2. Try direct image
+                if not img: img = val.get('image_url')
+                # 3. Try digging into the post data (common for video ads)
+                if not img:
+                    try: img = val.get('object_story_spec', {}).get('link_data', {}).get('picture')
+                    except: pass
+                
+                url_map[cid] = img
     except Exception: pass
     return url_map
 
@@ -139,15 +148,12 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         daily_params = {'access_token': token, 'time_range': time_range, 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100}
         daily_res = requests.get(base_url, params=daily_params)
         
-        # 3. Ad Level (FIXED: Added 'creative' to fields)
-        ad_start = (end_date - timedelta(days=7)).strftime('%Y-%m-%d')
-        if start_date > datetime.strptime(ad_start, '%Y-%m-%d').date(): ad_start = start_date.strftime('%Y-%m-%d')
-        ad_range = json.dumps({'since': ad_start, 'until': end_date.strftime('%Y-%m-%d')})
-        
+        # 3. Ad Level (For Gallery)
+        # Note: We query ads for the FULL selected range to ensure we match the dashboard data
         ad_params = {
-            'access_token': token, 'time_range': ad_range, 'level': 'ad',
-            'fields': 'ad_name,creative,spend,ctr,cpm,action_values', # <--- FIXED HERE
-            'limit': 20, 'sort': ['spend_descending']
+            'access_token': token, 'time_range': time_range, 'level': 'ad',
+            'fields': 'ad_name,creative,spend,ctr,cpm,action_values', 
+            'limit': 30, 'sort': ['spend_descending']
         }
         ad_res = requests.get(base_url, params=ad_params)
 
@@ -173,19 +179,18 @@ def fetch_meta_data(token, account_id, start_date, end_date):
             creative_ids = []
             for a in ad_data:
                 spend = float(a.get('spend', 0))
-                if spend > 0:
-                    actions = a.get('action_values', [])
-                    sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
-                    # Extract Creative ID safely
-                    cid = a.get('creative', {}).get('id')
-                    if cid: creative_ids.append(cid)
-                    
-                    gallery_ads.append({
-                        "name": a['ad_name'], "spend": spend, "roas": round(sales_val/spend, 2) if spend>0 else 0,
-                        "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0)), "creative_id": cid
-                    })
+                # Removed strict spend > 0 check to ensure we see something if API returns data
+                actions = a.get('action_values', [])
+                sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
+                cid = a.get('creative', {}).get('id')
+                if cid: creative_ids.append(cid)
+                
+                gallery_ads.append({
+                    "name": a['ad_name'], "spend": spend, 
+                    "roas": round(sales_val/spend, 2) if spend>0 else 0,
+                    "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0)), "creative_id": cid
+                })
             
-            # Fetch Images
             image_map = get_creative_images(token, creative_ids)
             for ad in gallery_ads:
                 ad['image_url'] = image_map.get(ad['creative_id'])
