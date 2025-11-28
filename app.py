@@ -152,6 +152,7 @@ def fetch_ad_creatives_batch(token, ad_ids):
                 for ad_id, val in data.items():
                     creative = val.get('creative', {})
                     img, link = None, None
+                    # Image Logic
                     try:
                         spec = creative.get('object_story_spec', {})
                         img = spec.get('link_data', {}).get('full_picture') or spec.get('link_data', {}).get('picture')
@@ -162,6 +163,7 @@ def fetch_ad_creatives_batch(token, ad_ids):
                         try: img = creative.get('asset_feed_spec', {}).get('images', [])[0].get('url')
                         except: pass
                     if not img: img = creative.get('image_url') or creative.get('thumbnail_url')
+                    # Link Logic
                     link = creative.get('instagram_permalink_url')
                     if not link:
                         pid = creative.get('effective_object_story_id')
@@ -231,12 +233,16 @@ def generate_briefing(ctx, s_data, m_data):
         client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
         analysis_payload = {
             "period": ctx.get('date_range'),
-            "metrics": {"net_profit": ctx['total_net_profit'], "revenue": s_data['total_sales'], "ad_spend": m_data['total_spend'], "blended_roas": ctx['blended_mer'], "new_customers": s_data['new_orders'], "ncpa": ctx['ncpa'], "aov": s_data['aov']},
+            "metrics": {
+                "net_profit": ctx['total_net_profit'], "revenue": s_data['total_sales'], 
+                "ad_spend": m_data['total_spend'], "blended_roas": ctx['blended_mer'], 
+                "new_customers": s_data['new_orders'], "ncpa": ctx['ncpa'], "aov": s_data['aov']
+            },
             "top_products": [p[0] for p in s_data['top_products']],
             "campaigns": m_data['campaign_df'].to_dict('records')
         }
         system_prompt = """You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys: {"headline": "A short, punchy 1-sentence summary.", "wins": ["Bullet 1", "Bullet 2"], "warnings": ["Bullet 1", "Bullet 2"], "action_plan": "One clear strategic recommendation.", "suggested_questions": ["Question 1 (Short)", "Question 2 (Short)", "Question 3 (Short)"]} Do not include markdown formatting. Return RAW JSON only."""
-        response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload)}], response_format={"type": "json_object"})
+        response = client.chat.completions.create(model=AI_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload)}], response_format={"type": "json_object"})
         return json.loads(response.choices[0].message.content)
     except Exception: return {"headline": "Analysis Unavailable", "wins": [], "warnings": [], "action_plan": "Check API keys.", "suggested_questions": []}
 
@@ -308,26 +314,14 @@ def run_sync_logic():
                 # GENERATE BRIEFING
                 briefing = generate_briefing(ctx, shop_data, meta_data)
                 
-                # Create HTML String for Chat
+                # FIX: FLATTEN HTML FOR BRIEFING
                 wins_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in briefing.get('wins', [])])
                 warn_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in briefing.get('warnings', [])])
                 
-                briefing_html = f"""
-                <div class="briefing-card">
-                    <div class="briefing-head">⚡ DAILY INTELLIGENCE</div>
-                    <div style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;">{briefing.get('headline')}</div>
-                    <div style="margin-bottom: 10px;"><div style="color: #00E676; font-weight: 600; margin-bottom: 4px;">WINS</div>{wins_html}</div>
-                    <div style="margin-bottom: 10px;"><div style="color: #FF3D00; font-weight: 600; margin-bottom: 4px;">WARNINGS</div>{warn_html}</div>
-                    <div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;">
-                        <div style="color: #0A84FF; font-weight: 600;">RECOMMENDATION</div>
-                        <div style="font-size: 13px; color: #ccc;">{briefing.get('action_plan')}</div>
-                    </div>
-                </div>
-                """
+                briefing_html = f"""<div class="briefing-card"><div class="briefing-head">⚡ DAILY INTELLIGENCE</div><div style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;">{briefing.get('headline')}</div><div style="margin-bottom: 10px;"><div style="color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WINS</div>{wins_html}</div><div style="margin-bottom: 10px;"><div style="color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WARNINGS</div>{warn_html}</div><div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;"><div style="color: #0A84FF; font-size: 12px; font-weight: 600;">RECOMMENDATION</div><div style="font-size: 13px; color: #ccc;">{briefing.get('action_plan')}</div></div></div>"""
                 
                 st.session_state.messages.append({
-                    "role": "assistant", 
-                    "content": briefing_html, 
+                    "role": "assistant", "content": briefing_html, 
                     "suggestions": briefing.get('suggested_questions', [])
                 })
                 save_memory("assistant", briefing_html, briefing.get('suggested_questions', []))
@@ -351,10 +345,7 @@ st.markdown(f"""
     div[data-testid="column"] {{ height: 88vh; overflow-y: auto; overflow-x: hidden; display: block; }}
     div[data-testid="column"]:nth-of-type(2) > div {{ padding-bottom: 150px !important; }}
     [data-testid="stChatInput"] {{ position: fixed !important; bottom: 0 !important; right: 1.5rem !important; left: auto !important; width: {chat_width_pct-2}% !important; min-width: 300px; background-color: #111 !important; z-index: 9999 !important; border-top: 1px solid #333; padding-top: 15px !important; padding-bottom: 25px !important; }}
-    
-    /* BUBBLE & TEXT SIZE */
     .chat-bubble, .chat-bubble *, .briefing-card, .briefing-card * {{ font-size: {font_size}px !important; line-height: 1.4; }}
-    
     .chat-bubble {{ padding: 12px 16px; border-radius: 18px; max-width: 85%; position: relative; word-wrap: break-word; margin-bottom: 4px; display: inline-block; }}
     .user-bubble {{ background-color: #0A84FF; color: white; border-bottom-right-radius: 2px; }}
     .bot-bubble {{ background-color: #262626; color: #E5E5EA; border: 1px solid #333; border-bottom-left-radius: 2px; }}
@@ -362,6 +353,8 @@ st.markdown(f"""
     .user-row {{ justify-content: flex-end; }}
     .bot-row {{ justify-content: flex-start; }}
     div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
+    
+    /* GALLERY & LIST STYLES (Flattened HTML) */
     .ad-card {{ background-color: #111; border: 1px solid #222; border-radius: 12px; overflow: hidden; margin-bottom: 20px; transition: transform 0.2s; position: relative; display: flex; flex-direction: column; }}
     .ad-card:hover {{ border-color: #444; transform: translateY(-2px); z-index: 10; }}
     .ad-image-container {{ position: relative; width: 100%; height: 220px; background-color: #000; overflow: hidden; }}
@@ -385,18 +378,12 @@ st.markdown(f"""
     .list-metrics {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; text-align: right; min-width: 250px; font-size: 11px; color: #888; }}
     .list-val {{ font-size: 13px; font-weight: 600; color: #eee; }}
     .list-badge {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; margin-left: 10px; }}
-    
-    /* BRIEFING CARD */
     .briefing-card {{ background: #1E1E1E; border: 1px solid #0A84FF; border-radius: 12px; padding: 15px; margin-bottom: 20px; }}
-    .briefing-head {{ color: #0A84FF; font-weight: 700; font-size: 14px; margin-bottom: 8px; display: flex; align-items: center; }}
-    .briefing-item {{ font-size: 13px; margin-bottom: 4px; display: flex; align-items: flex-start; }}
+    .briefing-head {{ color: #0A84FF; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; }}
+    .briefing-item {{ margin-bottom: 4px; display: flex; align-items: flex-start; }}
     .briefing-icon {{ margin-right: 8px; }}
     a {{ text-decoration: none; color: inherit; }}
-    
-    /* SUGGESTION BUTTONS */
-    .stButton button {{
-        border: 1px solid #333; background: #1a1a1a; color: #ddd; border-radius: 20px; font-size: 12px; padding: 4px 12px; margin-right: 5px;
-    }}
+    .stButton button {{ border: 1px solid #333; background: #1a1a1a; color: #ddd; border-radius: 20px; font-size: 12px; padding: 4px 12px; margin-right: 5px; }}
     .stButton button:hover {{ border-color: #0A84FF; color: #0A84FF; }}
 </style>
 """, unsafe_allow_html=True)
@@ -406,27 +393,18 @@ st.markdown(f"""
 # ==========================================
 dash_col, chat_col = st.columns([100-chat_width_pct, chat_width_pct], gap="medium")
 
-# --- LEFT: DASHBOARD ---
 with dash_col:
     with st.container(height=850, border=False):
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
-            
-            # 1. Row 1 (Revenue, Orders, AOV, True Profit)
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
             c2.metric("Orders", f"{s_data['order_count']:,}")
-            c3.metric("AOV", f"${s_data['aov']:.2f}")
-            c4.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
-            
-            # 2. Row 2 (Ad Spend, MER, nCPA, ROAS)
-            c5, c6, c7, c8 = st.columns(4)
-            c5.metric("Ad Spend", f"${m_data['total_spend']:,.0f}")
-            c6.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
-            c7.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
-            c8.metric("FB ROAS", f"{ctx['roas']:.2f}x")
-            
+            c3.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
+            c4.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
+            c5.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
+            c6.metric("FB ROAS", f"{ctx['roas']:.2f}x")
             st.markdown("---")
             
             tab1, tab2, tab3, tab4 = st.tabs(["Growth (New vs Ret)", "Profit Chart", "Creative Gallery", "Campaigns"])
@@ -485,7 +463,6 @@ with chat_col:
             else:
                 if "<div" in msg['content']: 
                     st.markdown(msg['content'], unsafe_allow_html=True)
-                    # Render suggestions
                     if msg.get('suggestions'):
                         cols = st.columns(len(msg['suggestions']))
                         for idx, sug in enumerate(msg['suggestions']):
@@ -496,7 +473,6 @@ with chat_col:
                     st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
         st.markdown('<div id="end-of-chat"></div>', unsafe_allow_html=True)
 
-# Handle Triggered Prompt
 if 'trigger_prompt' in st.session_state and st.session_state.trigger_prompt:
     prompt = st.session_state.trigger_prompt
     st.session_state.trigger_prompt = None 
@@ -524,7 +500,7 @@ if run_ai:
         
         history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
         final_prompt = f"You are a Senior Media Buyer. Use this data:\n{context_str}"
-        stream = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": final_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history], stream=True)
+        stream = client.chat.completions.create(model=AI_MODEL, messages=[{"role": "system", "content": final_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history], stream=True)
         
         response_text = ""
         for chunk in stream:
