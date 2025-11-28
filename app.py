@@ -125,8 +125,6 @@ def fetch_ad_creatives_batch(token, ad_ids):
                     creative = val.get('creative', {})
                     img = None
                     link = None
-                    
-                    # Image Logic
                     try:
                         spec = creative.get('object_story_spec', {})
                         img = spec.get('link_data', {}).get('full_picture') or spec.get('link_data', {}).get('picture')
@@ -140,14 +138,12 @@ def fetch_ad_creatives_batch(token, ad_ids):
                         except: pass
                     if not img: img = creative.get('image_url') or creative.get('thumbnail_url')
                     
-                    # Link Logic
                     link = creative.get('instagram_permalink_url')
                     if not link:
                         post_id = creative.get('effective_object_story_id')
                         if post_id: link = f"https://www.facebook.com/{post_id}"
                             
-                    if img:
-                        image_map[ad_id] = {"img": img, "link": link}
+                    if img: image_map[ad_id] = {"img": img, "link": link}
         except Exception: pass
     return image_map
 
@@ -164,14 +160,11 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         daily_params = {'access_token': token, 'time_range': time_range, 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100}
         daily_res = requests.get(base_url, params=daily_params)
         
-        # 3. Ad Level (UPGRADE: Added adset_name, campaign_name, created_time)
+        # 3. Ad Level
         ad_params = {
-            'access_token': token, 
-            'time_range': time_range, 
-            'level': 'ad',
-            'fields': 'ad_id,ad_name,adset_name,campaign_name,created_time,spend,ctr,cpm,action_values', 
-            'limit': 50, 
-            'sort': ['spend_descending']
+            'access_token': token, 'time_range': time_range, 'level': 'ad',
+            'fields': 'ad_id,ad_name,adset_name,campaign_name,created_time,spend,ctr,cpm,actions,action_values', 
+            'limit': 50, 'sort': ['spend_descending']
         }
         ad_res = requests.get(base_url, params=ad_params)
 
@@ -201,11 +194,16 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         for a in ad_data:
             spend = float(a.get('spend', 0))
             if spend > 0 or int(a.get('impressions', 0)) > 10:
-                actions = a.get('action_values', [])
-                sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
-                ad_id = a.get('ad_id') or a.get('id')
+                actions = a.get('actions', [])
+                action_values = a.get('action_values', [])
                 
-                # Calculate Live Days
+                # EXTRACT METRICS
+                purchases = sum([float(x['value']) for x in actions if x['action_type'] == 'purchase'])
+                revenue = sum([float(x['value']) for x in action_values if x['action_type'] == 'purchase'])
+                roas = round(revenue/spend, 2) if spend > 0 else 0
+                cpa = round(spend/purchases, 2) if purchases > 0 else 0
+                
+                ad_id = a.get('ad_id') or a.get('id')
                 created = datetime.strptime(a.get('created_time', datetime.now().strftime('%Y-%m-%d')), '%Y-%m-%d')
                 days_live = (datetime.now() - created).days
                 
@@ -214,12 +212,16 @@ def fetch_meta_data(token, account_id, start_date, end_date):
                     gallery_ads.append({
                         "id": ad_id,
                         "name": a['ad_name'], 
-                        "campaign": a.get('campaign_name', 'Unknown Campaign'),
-                        "adset": a.get('adset_name', 'Unknown Ad Set'),
+                        "campaign": a.get('campaign_name', 'Unknown'),
+                        "adset": a.get('adset_name', 'Unknown'),
                         "days_live": days_live,
-                        "spend": spend, 
-                        "roas": round(sales_val/spend, 2) if spend>0 else 0,
-                        "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0))
+                        "spend": spend,
+                        "revenue": revenue,
+                        "purchases": int(purchases),
+                        "cpa": cpa,
+                        "roas": roas,
+                        "ctr": float(a.get('ctr', 0)), 
+                        "cpm": float(a.get('cpm', 0))
                     })
         
         if ad_ids_to_fetch:
@@ -302,10 +304,8 @@ st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; background-color: #000; color: #fff; height: 100vh; overflow: hidden !important; }}
-    
     header[data-testid="stHeader"] {{ background-color: transparent !important; z-index: 999; }}
     .stApp > header {{ background-color: transparent; }}
-    
     .block-container {{ max-width: 100%; padding: 4rem 1rem 0 1rem; height: 100vh; overflow: hidden !important; }}
     div[data-testid="column"] {{ height: 90vh; overflow-y: auto; overflow-x: hidden; display: block; }}
     div[data-testid="column"]:nth-of-type(2) > div {{ padding-bottom: 150px !important; }}
@@ -326,17 +326,19 @@ st.markdown(f"""
     .ad-bg {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-size: cover; background-position: center; filter: blur(20px) brightness(0.5); z-index: 1; }}
     .ad-image {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }}
     
+    /* FOOTER GRID */
     .ad-footer {{ background-color: #161616; padding: 12px; border-top: 1px solid #222; flex-grow: 1; }}
-    .ad-title {{ font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; }}
+    .ad-title {{ font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
     .ad-badge-top {{ position: absolute; top: 8px; right: 8px; z-index: 4; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; backdrop-filter: blur(4px); }}
+    .ad-link-icon {{ position: absolute; top: 8px; left: 8px; z-index: 4; padding: 4px; border-radius: 50%; background: rgba(0,0,0,0.6); color: white; backdrop-filter: blur(4px); }}
     
-    .row-split {{ display: flex; justify-content: space-between; font-size: 12px; color: #888; margin-top: 4px; align-items: center; }}
-    .text-val {{ font-weight: 600; color: #ccc; }}
-    .context-tag {{ font-size: 10px; background: #222; padding: 2px 6px; border-radius: 4px; color: #888; max-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    .grid-stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 11px; color: #888; }}
+    .stat-box {{ margin-bottom: 4px; }}
+    .text-val {{ font-weight: 600; color: #eee; font-size: 12px; }}
     
-    .btn-view {{ display: block; width: 100%; text-align: center; background: #222; color: #ccc; font-size: 11px; padding: 6px 0; border-radius: 6px; margin-top: 10px; transition: background 0.2s; }}
+    .context-tag {{ font-size: 10px; background: #222; padding: 2px 6px; border-radius: 4px; color: #888; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
+    .btn-view {{ display: block; width: 100%; text-align: center; background: #222; color: #ccc; font-size: 11px; padding: 6px 0; border-radius: 6px; margin-top: 8px; transition: background 0.2s; }}
     .btn-view:hover {{ background: #333; color: white; }}
-    
     a {{ text-decoration: none; color: inherit; }}
 </style>
 """, unsafe_allow_html=True)
@@ -373,12 +375,12 @@ with dash_col:
                     st.plotly_chart(fig, use_container_width=True)
             
             with tab2:
-                sort_mode = st.selectbox("Sort By", ["Highest Spend", "Best ROAS", "Highest CTR"], label_visibility="collapsed")
+                sort_mode = st.selectbox("Sort By", ["Highest Spend", "Best ROAS", "Most Sales"], label_visibility="collapsed")
                 ads = m_data.get('gallery_ads', [])
                 if ads:
                     if sort_mode == "Highest Spend": ads = sorted(ads, key=lambda x: x['spend'], reverse=True)
                     elif sort_mode == "Best ROAS": ads = sorted(ads, key=lambda x: x['roas'], reverse=True)
-                    elif sort_mode == "Highest CTR": ads = sorted(ads, key=lambda x: x['ctr'], reverse=True)
+                    elif sort_mode == "Most Sales": ads = sorted(ads, key=lambda x: x['purchases'], reverse=True)
 
                     cols = st.columns(3)
                     for i, ad in enumerate(ads):
@@ -392,28 +394,33 @@ with dash_col:
                             link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
                             
                             st.markdown(f"""
-                            <div class="ad-card">
-                                <div class="ad-image-container">
-                                    <div class="ad-bg" style="background-image: url('{img_src}');"></div>
-                                    <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
-                                    <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
-                                </div>
-                                <div class="ad-footer">
-                                    <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
-                                    <div class="row-split" style="margin-bottom:6px;">
+                            <a href="{link}" target="_blank">
+                                <div class="ad-card">
+                                    <div class="ad-image-container">
+                                        <div class="ad-bg" style="background-image: url('{img_src}');"></div>
+                                        <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
+                                        <div class="ad-link-icon">↗</div>
+                                        <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
+                                    </div>
+                                    <div class="ad-footer">
+                                        <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
                                         <div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div>
-                                        <div class="context-tag" title="Ad Set: {ad['adset']}">{ad['adset']}</div>
+                                        
+                                        <div class="grid-stats">
+                                            <div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div>
+                                            <div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div>
+                                            
+                                            <div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div>
+                                            <div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div>
+                                            
+                                            <div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div>
+                                            <div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div>
+                                        </div>
+                                        
+                                        <div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div>
                                     </div>
-                                    <div class="row-split">
-                                        <div><span style="color:#888;">Spend</span> <span class="text-val">${ad['spend']:,.0f}</span></div>
-                                        <div><span style="color:#888;">CTR</span> <span class="text-val">{ad['ctr']:.2f}%</span></div>
-                                    </div>
-                                    <div class="row-split">
-                                        <div style="font-size:10px; color:#555;">Live for {ad['days_live']} days</div>
-                                    </div>
-                                    <a href="{link}" target="_blank" class="btn-view">View Ad ↗</a>
                                 </div>
-                            </div>
+                            </a>
                             """, unsafe_allow_html=True)
                 else: st.info("No active creatives found in this date range.")
 
