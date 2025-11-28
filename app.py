@@ -4,7 +4,7 @@ import pandas as pd
 import requests
 import plotly.graph_objects as go
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from streamlit_gsheets import GSheetsConnection
 
 # --- 1. PAGE CONFIGURATION ---
@@ -34,10 +34,9 @@ def save_memory(role, content):
         conn.update(worksheet="ChatHistory", data=updated_data)
     except Exception: pass
 
-# --- 3. DATA FETCHING (DYNAMIC DATES) ---
+# --- 3. DATA FETCHING ---
 
 def get_product_costs(domain, token, variant_ids):
-    """Fetches real COGS from Shopify Inventory."""
     if not variant_ids: return {}
     cost_map = {}
     try:
@@ -73,19 +72,14 @@ def get_product_costs(domain, token, variant_ids):
 
 def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
     try:
-        # Convert dates to ISO format for Shopify
-        # created_at_min requires ISO 8601 (YYYY-MM-DDTHH:MM:SS)
         start_iso = start_date.strftime('%Y-%m-%dT00:00:00')
         end_iso = end_date.strftime('%Y-%m-%dT23:59:59')
-        
         url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&created_at_min={start_iso}&created_at_max={end_iso}&limit=250"
         headers = {"X-Shopify-Access-Token": token}
         res = requests.get(url, headers=headers)
         
         if res.status_code == 200:
             orders = res.json().get('orders', [])
-            
-            # Fetch Real Costs
             all_variant_ids = set()
             for o in orders:
                 for item in o.get('line_items', []):
@@ -101,10 +95,8 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
             for o in orders:
                 date = o['created_at'][:10]
                 if date not in daily_map: daily_map[date] = {'sales': 0, 'cogs': 0}
-                
                 order_rev = float(o['total_price'])
                 order_cogs = 0
-                
                 for item in o.get('line_items', []):
                     vid = item.get('variant_id')
                     price = float(item['price'])
@@ -140,28 +132,27 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
 def fetch_meta_data(token, account_id, start_date, end_date):
     try:
         base_url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
-        
-        # Dynamic Time Range
         time_range = json.dumps({'since': start_date.strftime('%Y-%m-%d'), 'until': end_date.strftime('%Y-%m-%d')})
         
-        # 1. Campaign Level
         cmp_params = {
             'access_token': token, 'time_range': time_range, 'level': 'campaign',
             'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc', 'limit': 100
         }
         cmp_res = requests.get(base_url, params=cmp_params)
         
-        # 2. Daily Spend
         daily_params = {
             'access_token': token, 'time_range': time_range, 'level': 'account',
             'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100
         }
         daily_res = requests.get(base_url, params=daily_params)
         
-        # 3. Ad Level (For AI Context - Last 7 days relative to end date to keep prompt small)
+        # Ad Level (For AI Context)
         ad_start = (end_date - timedelta(days=7)).strftime('%Y-%m-%d')
+        # Ensure ad start doesn't exceed bounds if range is short
+        if start_date > datetime.strptime(ad_start, '%Y-%m-%d').date():
+            ad_start = start_date.strftime('%Y-%m-%d')
+            
         ad_range = json.dumps({'since': ad_start, 'until': end_date.strftime('%Y-%m-%d')})
-        
         ad_params = {
             'access_token': token, 'time_range': ad_range, 'level': 'ad',
             'fields': 'ad_name,spend,ctr,cpm,action_values', 'limit': 20
@@ -208,81 +199,100 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         else: return None, f"Meta Error: {daily_res.text}"
     except Exception as e: return None, f"Meta Crash: {e}"
 
-# --- 4. APP STATE & CONTROLS ---
-
+# --- 4. APP STATE ---
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
 if 'logs' not in st.session_state: st.session_state.logs = []
+if 'last_synced_dates' not in st.session_state: st.session_state.last_synced_dates = None
 
+# --- 5. SIDEBAR SETTINGS ---
 with st.sidebar:
     st.markdown("### ⚙️ Settings")
     
-    # 1. DATE PICKER
-    st.caption("Data Period")
-    
-    # Default to last 30 days
-    default_start = datetime.now() - timedelta(days=29)
-    default_end = datetime.now()
-    
-    date_range = st.date_input(
-        "Select Range",
-        value=(default_start, default_end),
-        max_value=datetime.now()
+    # --- DATE PRESETS ---
+    preset = st.selectbox(
+        "Date Range",
+        ["Last 7 Days", "Last 30 Days", "This Month", "Last Month", "Custom"],
+        index=1
     )
     
-    st.divider()
+    today = datetime.now().date()
+    start_d, end_d = today, today # Defaults
     
-    # 2. UI CONTROLS
+    if preset == "Last 7 Days":
+        start_d = today - timedelta(days=7)
+        end_d = today
+    elif preset == "Last 30 Days":
+        start_d = today - timedelta(days=30)
+        end_d = today
+    elif preset == "This Month":
+        start_d = today.replace(day=1)
+        end_d = today
+    elif preset == "Last Month":
+        first = today.replace(day=1)
+        end_d = first - timedelta(days=1)
+        start_d = end_d.replace(day=1)
+    else: # Custom
+        cols = st.columns(2)
+        start_d = cols[0].date_input("Start", value=today - timedelta(days=30))
+        end_d = cols[1].date_input("End", value=today)
+
+    # UI CONTROLS
+    st.divider()
     chat_width_pct = st.slider("Chat Width", 20, 60, 35, 5, format="%d%%")
     font_size = st.slider("Text Size", 12, 24, 14, 1, format="%dpx")
     margin_pct = st.slider("Margin % (Fallback)", 10, 90, 60, 5, format="%d%%") / 100.0
-    
     st.divider()
-    
-    if st.button("🔄 Sync Data", type="primary", use_container_width=True):
-        if len(date_range) != 2:
-            st.error("Please select a valid start and end date.")
-        else:
-            start_d, end_d = date_range
-            
-            with st.spinner("Syncing..."):
-                st.session_state.logs = [] 
-                try:
-                    s_domain, s_token = st.secrets["SHOPIFY_DOMAIN"], st.secrets["SHOPIFY_TOKEN"]
-                    m_token, m_id = st.secrets["META_TOKEN"], st.secrets["META_ACCOUNT_ID"]
-                    
-                    # Pass dates to fetch functions
-                    shop_data, s_err = fetch_shopify_data(s_domain, s_token, margin_pct, start_d, end_d)
-                    meta_data, m_err = fetch_meta_data(m_token, m_id, start_d, end_d)
-                    
-                    if s_err: st.session_state.logs.append(s_err)
-                    if m_err: st.session_state.logs.append(m_err)
 
-                    if shop_data and meta_data:
-                        # --- TRUE PROFIT CALCULATION ---
-                        df_s = shop_data['daily_df']
-                        df_m = meta_data['daily_spend_df']
-                        
-                        if not df_s.empty and not df_m.empty:
-                            df_merged = pd.merge(df_s, df_m, on='date', how='outer').fillna(0)
-                            df_merged['gross_profit'] = df_merged['sales'] - df_merged['cogs']
-                            df_merged['net_profit'] = df_merged['gross_profit'] - df_merged['spend']
-                            df_merged = df_merged.sort_values('date')
-                            total_net_profit = df_merged['net_profit'].sum()
-                        else:
-                            df_merged = pd.DataFrame()
-                            total_net_profit = 0
+    # --- AUTO-SYNC LOGIC ---
+    # Define a sync function we can call automatically
+    def run_sync():
+        with st.spinner("Syncing..."):
+            st.session_state.logs = [] 
+            try:
+                s_domain, s_token = st.secrets["SHOPIFY_DOMAIN"], st.secrets["SHOPIFY_TOKEN"]
+                m_token, m_id = st.secrets["META_TOKEN"], st.secrets["META_ACCOUNT_ID"]
+                
+                shop_data, s_err = fetch_shopify_data(s_domain, s_token, margin_pct, start_d, end_d)
+                meta_data, m_err = fetch_meta_data(m_token, m_id, start_d, end_d)
+                
+                if s_err: st.session_state.logs.append(s_err)
+                if m_err: st.session_state.logs.append(m_err)
 
-                        st.session_state['context'] = {
-                            "shopify": shop_data,
-                            "meta": meta_data,
-                            "profit_df": df_merged,
-                            "total_net_profit": total_net_profit,
-                            "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0,
-                            "date_range": f"{start_d} to {end_d}"
-                        }
-                        if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
-                    else: st.toast("Sync Failed", icon="⚠️")
-                except Exception as e: st.session_state.logs.append(f"Config Error: {e}")
+                if shop_data and meta_data:
+                    df_s = shop_data['daily_df']
+                    df_m = meta_data['daily_spend_df']
+                    
+                    if not df_s.empty and not df_m.empty:
+                        df_merged = pd.merge(df_s, df_m, on='date', how='outer').fillna(0)
+                        df_merged['gross_profit'] = df_merged['sales'] - df_merged['cogs']
+                        df_merged['net_profit'] = df_merged['gross_profit'] - df_merged['spend']
+                        df_merged = df_merged.sort_values('date')
+                        total_net_profit = df_merged['net_profit'].sum()
+                    else:
+                        df_merged = pd.DataFrame()
+                        total_net_profit = 0
+
+                    st.session_state['context'] = {
+                        "shopify": shop_data,
+                        "meta": meta_data,
+                        "profit_df": df_merged,
+                        "total_net_profit": total_net_profit,
+                        "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0,
+                        "date_range": f"{start_d} to {end_d}"
+                    }
+                    st.session_state.last_synced_dates = (start_d, end_d)
+                    if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
+                else: st.toast("Sync Failed", icon="⚠️")
+            except Exception as e: st.session_state.logs.append(f"Config Error: {e}")
+
+    # TRIGGER SYNC IF DATES CHANGED
+    current_dates = (start_d, end_d)
+    if st.session_state.last_synced_dates != current_dates:
+        run_sync()
+
+    # MANUAL SYNC BUTTON (Optional force refresh)
+    if st.button("🔄 Force Sync", type="secondary", use_container_width=True):
+        run_sync()
 
     if st.session_state.logs:
         with st.expander(f"⚠️ Logs ({len(st.session_state.logs)})"):
@@ -293,7 +303,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# --- 6. CSS (HEADER FIX & SCROLL) ---
+# --- 6. CSS ---
 st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
@@ -305,26 +315,12 @@ st.markdown(f"""
         overflow: hidden !important; 
     }}
     
-    /* HEADER FIX: Visible but transparent */
-    header[data-testid="stHeader"] {{
-        background-color: transparent !important;
-        z-index: 999;
-    }}
+    header[data-testid="stHeader"] {{ background-color: transparent !important; z-index: 999; }}
     .stApp > header {{ background-color: transparent; }}
     
-    .block-container {{
-        max-width: 100%;
-        padding: 4rem 1rem 0 1rem; 
-        height: 100vh;
-        overflow: hidden !important;
-    }}
+    .block-container {{ max-width: 100%; padding: 4rem 1rem 0 1rem; height: 100vh; overflow: hidden !important; }}
     
-    div[data-testid="column"] {{
-        height: 90vh;
-        overflow-y: auto;
-        overflow-x: hidden;
-        display: block;
-    }}
+    div[data-testid="column"] {{ height: 90vh; overflow-y: auto; overflow-x: hidden; display: block; }}
     div[data-testid="column"]:nth-of-type(2) > div {{ padding-bottom: 150px !important; }}
 
     [data-testid="stChatInput"] {{
@@ -369,7 +365,6 @@ with dash_col:
 
             st.markdown("---")
             
-            # PROFIT CHART
             st.subheader("Daily Net Profit")
             df = ctx['profit_df']
             if not df.empty:
@@ -383,7 +378,7 @@ with dash_col:
             st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
             st.markdown("<br><br><br>", unsafe_allow_html=True)
         else:
-            st.info("👈 Select a Date Range and Sync Data to begin.")
+            st.info("👈 Select Date Range to begin.")
 
 # --- RIGHT: CHAT ---
 with chat_col:
@@ -406,25 +401,8 @@ if prompt := st.chat_input("Ask about your data..."):
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
-            
             top_ads = "\n".join(m_data['top_ads_list'])
-            
-            context_str = f"""
-            DATE RANGE: {ctx.get('date_range', 'Last 30 Days')}
-            
-            OVERVIEW:
-            - Net Profit: ${ctx['total_net_profit']:,.2f}
-            - Revenue: ${s_data['total_sales']}
-            - COGS: ${s_data['total_cogs']}
-            - Ad Spend: ${m_data['total_spend']}
-            - ROAS: {ctx['roas']:.2f}x
-            
-            RECENT TOP ADS:
-            {top_ads}
-            
-            CAMPAIGNS:
-            {m_data['campaign_df'].to_string(index=False)}
-            """
+            context_str = f"DATE RANGE: {ctx.get('date_range')}\nOVERVIEW:\n- Net Profit: ${ctx['total_net_profit']:,.2f}\n- Revenue: ${s_data['total_sales']}\n- COGS: ${s_data['total_cogs']}\n- Ad Spend: ${m_data['total_spend']}\n- ROAS: {ctx['roas']:.2f}x\n\nRECENT TOP ADS:\n{top_ads}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
         
         history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
         final_prompt = f"You are a Senior Media Buyer. Use this data to answer:\n{context_str}"
