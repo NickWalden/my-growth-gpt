@@ -111,26 +111,40 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
     except Exception as e: return None, f"Shopify Crash: {e}"
 
 def get_creative_images(token, creative_ids):
-    """Robust image fetcher that checks multiple fields."""
+    """Deep search for images in Meta Creative Objects"""
     if not creative_ids: return {}
     url_map = {}
     try:
+        # Request fields including nested data structures
         ids_str = ",".join(creative_ids[:50])
-        # We ask for object_story_spec to handle "Boosted Posts" or dynamic ads
-        url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=thumbnail_url,image_url,name,object_story_spec&access_token={token}"
+        url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=thumbnail_url,image_url,name,object_story_spec,asset_feed_spec&access_token={token}"
         res = requests.get(url)
         if res.status_code == 200:
             data = res.json()
             for cid, val in data.items():
-                # 1. Try direct thumbnail
-                img = val.get('thumbnail_url')
-                # 2. Try direct image
-                if not img: img = val.get('image_url')
-                # 3. Try digging into the post data (common for video ads)
+                img = None
+                # Priority 1: Direct Thumbnail/Image
+                img = val.get('thumbnail_url') or val.get('image_url')
+                
+                # Priority 2: Object Story Spec (Standard Ads)
                 if not img:
-                    try: img = val.get('object_story_spec', {}).get('link_data', {}).get('picture')
+                    try:
+                        spec = val.get('object_story_spec', {})
+                        # Link Data (Single Image)
+                        img = spec.get('link_data', {}).get('picture')
+                        # Photo Data
+                        if not img: img = spec.get('photo_data', {}).get('image_url')
+                        # Video Data
+                        if not img: img = spec.get('video_data', {}).get('image_url')
                     except: pass
                 
+                # Priority 3: Asset Feed (DCO / Dynamic Ads)
+                if not img:
+                    try:
+                        images = val.get('asset_feed_spec', {}).get('images', [])
+                        if images: img = images[0].get('url')
+                    except: pass
+
                 url_map[cid] = img
     except Exception: pass
     return url_map
@@ -148,12 +162,13 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         daily_params = {'access_token': token, 'time_range': time_range, 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100}
         daily_res = requests.get(base_url, params=daily_params)
         
-        # 3. Ad Level (For Gallery)
-        # Note: We query ads for the FULL selected range to ensure we match the dashboard data
+        # 3. Ad Level (FIX: Use SAME time range as dashboard, remove sort to avoid empty results)
         ad_params = {
-            'access_token': token, 'time_range': time_range, 'level': 'ad',
+            'access_token': token, 
+            'time_range': time_range, # Use the full user-selected range!
+            'level': 'ad',
             'fields': 'ad_name,creative,spend,ctr,cpm,action_values', 
-            'limit': 30, 'sort': ['spend_descending']
+            'limit': 50 # Increase limit
         }
         ad_res = requests.get(base_url, params=ad_params)
 
@@ -179,18 +194,23 @@ def fetch_meta_data(token, account_id, start_date, end_date):
             creative_ids = []
             for a in ad_data:
                 spend = float(a.get('spend', 0))
-                # Removed strict spend > 0 check to ensure we see something if API returns data
-                actions = a.get('action_values', [])
-                sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
-                cid = a.get('creative', {}).get('id')
-                if cid: creative_ids.append(cid)
-                
-                gallery_ads.append({
-                    "name": a['ad_name'], "spend": spend, 
-                    "roas": round(sales_val/spend, 2) if spend>0 else 0,
-                    "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0)), "creative_id": cid
-                })
+                # Soft filter: Only show ads with > $0 spend OR impressions
+                if spend > 0 or int(a.get('impressions', 0)) > 100:
+                    actions = a.get('action_values', [])
+                    sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
+                    cid = a.get('creative', {}).get('id')
+                    if cid: creative_ids.append(cid)
+                    
+                    gallery_ads.append({
+                        "name": a['ad_name'], "spend": spend, 
+                        "roas": round(sales_val/spend, 2) if spend>0 else 0,
+                        "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0)), "creative_id": cid
+                    })
             
+            # Python Sort (Safer than API sort)
+            gallery_ads.sort(key=lambda x: x['spend'], reverse=True)
+            
+            # Fetch Images
             image_map = get_creative_images(token, creative_ids)
             for ad in gallery_ads:
                 ad['image_url'] = image_map.get(ad['creative_id'])
@@ -345,7 +365,7 @@ with dash_col:
                                     </div>
                                 </div>
                             </div>""", unsafe_allow_html=True)
-                else: st.info("No active creatives found.")
+                else: st.info("No active creatives found in this date range.")
 
             with tab3:
                 st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
