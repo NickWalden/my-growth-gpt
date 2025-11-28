@@ -71,21 +71,22 @@ def fetch_meta_campaigns(token, account_id):
         else: return None, 0, f"Meta Error {res.status_code}: {res.text}"
     except Exception as e: return None, 0, f"Meta Crash: {e}"
 
-# --- 4. APP LOGIC & STATE ---
+# --- 4. APP STATE & CONTROLS ---
 
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
 if 'logs' not in st.session_state: st.session_state.logs = []
 
-# ==========================================
-# ⬅️ LEFT SIDEBAR: SETTINGS
-# ==========================================
+# SIDEBAR CONTROLS
 with st.sidebar:
     st.markdown("### ⚙️ Console Settings")
-    chat_width_pct = st.slider("Chat Drawer Width", min_value=20, max_value=50, value=30, step=5, format="%d%%")
-    font_size = st.slider("Chat Text Size", min_value=12, max_value=20, value=14, step=1, format="%dpx")
+    
+    # SLIDERS
+    chat_width_pct = st.slider("Chat Width", 20, 50, 30, 5, format="%d%%")
+    font_size = st.slider("Text Size", 12, 20, 14, 1, format="%dpx")
     
     st.divider()
     
+    # SYNC BUTTON
     if st.button("🔄 Sync Data", type="primary", use_container_width=True):
         with st.spinner("Syncing..."):
             st.session_state.logs = [] 
@@ -114,11 +115,15 @@ with st.sidebar:
             for err in st.session_state.logs: st.error(err)
             
     st.divider()
-    if st.button("Clear Chat Memory", type="secondary", use_container_width=True):
+    if st.button("Clear Memory", type="secondary", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
-# --- 5. SPLIT SCREEN SCROLLING CSS ---
+# --- 5. DYNAMIC CSS (FIXED SCROLLING) ---
+# We calculate the input width carefully.
+# Streamlit wide mode has some padding, so we subtract a bit from the % to prevent overlap.
+input_width_calc = f"calc({chat_width_pct}% - 2rem)"
+
 st.markdown(f"""
 <style>
     /* GLOBAL RESET */
@@ -128,94 +133,79 @@ st.markdown(f"""
         background-color: #000000;
         color: #ffffff;
     }}
-
+    
     /* HIDE HEADER */
     header[data-testid="stHeader"] {{ background-color: transparent; }}
-    
-    /* 1. LOCK MAIN PAGE SCROLL */
-    /* This stops the whole page from moving. We only scroll the columns. */
-    .block-container {{
-        max-width: 100%;
-        padding-top: 2rem;
-        padding-bottom: 0rem;
-        height: 100vh;
-        overflow: hidden !important;
-    }}
+    .block-container {{ padding-top: 1rem; padding-bottom: 0rem; max-width: 100%; }}
 
-    /* 2. ENABLE INDEPENDENT COLUMN SCROLLING */
-    /* We target the specific columns using the ID markers we inject below */
-    
-    div[data-testid="column"]:has(#dashboard-marker) {{
-        height: calc(100vh - 50px);
-        overflow-y: auto;
-        padding-bottom: 50px;
-        padding-right: 10px; /* Avoid scrollbar covering content */
-    }}
-    
-    div[data-testid="column"]:has(#chat-marker) {{
-        height: calc(100vh - 50px);
-        overflow-y: auto;
-        padding-bottom: 150px; /* Extra space for sticky input */
+    /* --- SCROLLING FIX --- */
+    /* We make a specific class for the Chat Container to handle its own scroll */
+    .chat-scroll-container {{
+        height: 85vh;          /* Fixed height relative to screen */
+        overflow-y: auto;      /* Internal scrolling */
+        padding-bottom: 120px; /* Space for the sticky input */
         padding-right: 10px;
     }}
-
-    /* CHAT INPUT POSITIONING */
+    
+    /* --- STICKY INPUT POSITIONING --- */
     [data-testid="stChatInput"] {{
         position: fixed !important;
         bottom: 0 !important;
-        right: 0 !important;
+        right: 1rem !important; /* Anchor to right edge with small gap */
         left: auto !important;
-        width: {chat_width_pct}% !important;
-        padding: 20px !important;
+        width: {chat_width_pct}% !important; /* Dynamic width from slider */
+        min-width: 300px;
         background-color: #111111 !important;
         z-index: 9999 !important;
         border-top: 1px solid #333;
+        padding-bottom: 20px !important;
     }}
-    
+
     /* CUSTOM CHAT BUBBLES */
     .chat-row {{ display: flex; margin-bottom: 12px; width: 100%; }}
     .user-row {{ justify-content: flex-end; }}
     .bot-row {{ justify-content: flex-start; }}
+
     .chat-bubble {{
         padding: 10px 14px;
         border-radius: 16px;
         max-width: 85%;
-        font-size: {font_size}px;
+        font-size: {font_size}px; /* Dynamic Font Size */
         line-height: 1.4;
         position: relative;
         word-wrap: break-word;
     }}
+
     .user-bubble {{ background-color: #007AFF; color: white; border-bottom-right-radius: 2px; }}
     .bot-bubble {{ background-color: #252525; color: #E5E5EA; border: 1px solid #333; border-bottom-left-radius: 2px; }}
+    
     div[data-testid="stMetric"] {{ background-color: #1C1C1E; border: 1px solid #2C2C2E; padding: 15px; border-radius: 12px; }}
 
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🖥️ MAIN SPLIT SCREEN LAYOUT
+# 🖥️ MAIN SPLIT LAYOUT
 # ==========================================
 
+# 1. Define Columns based on slider
 dash_col, chat_col = st.columns([100-chat_width_pct, chat_width_pct], gap="medium")
 
 # ------------------------------------------
-# 📊 LEFT COLUMN: DASHBOARD
+# 📊 LEFT: DASHBOARD (Standard Page Scroll)
 # ------------------------------------------
 with dash_col:
-    # INJECT MARKER FOR CSS SCROLL TARGETING
-    st.markdown('<div id="dashboard-marker"></div>', unsafe_allow_html=True)
-    
     st.markdown("## Overview")
     
     if 'context' in st.session_state:
         ctx = st.session_state['context']
         
-        # Metrics Row
+        # Metrics
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Revenue", f"${ctx['total_sales']:,.0f}")
         c2.metric("Spend", f"${ctx['total_spend']:,.0f}")
         c3.metric("ROAS", f"{ctx['roas']:.2f}x")
-        c4.metric("Profit (Est)", f"${(ctx['total_sales']*0.6 - ctx['total_spend']):,.0f}")
+        c4.metric("Profit", f"${(ctx['total_sales']*0.6 - ctx['total_spend']):,.0f}")
         
         st.markdown("---")
         
@@ -241,36 +231,36 @@ with dash_col:
                 hide_index=True,
                 use_container_width=True
             )
-            # Add extra space at bottom of dashboard so you can scroll to last item
-            st.markdown("<br><br><br>", unsafe_allow_html=True)
+            st.markdown("<br><br>", unsafe_allow_html=True) # Bottom spacer
     else:
         st.info("👈 Please Sync Data from the sidebar.")
 
 # ------------------------------------------
-# 💬 RIGHT COLUMN: CHAT DRAWER
+# 💬 RIGHT: CHAT (Independent Scroll Container)
 # ------------------------------------------
 with chat_col:
-    # INJECT MARKER FOR CSS SCROLL TARGETING
-    st.markdown('<div id="chat-marker"></div>', unsafe_allow_html=True)
-    
     st.markdown("### AI Strategist")
+    
+    # We create a specific DIV for the chat history that scrolls internally
+    # This prevents it from scrolling the dashboard
+    chat_html = '<div class="chat-scroll-container">'
     
     for msg in st.session_state.messages:
         if msg["role"] == "user":
-            st.markdown(f"""
+            chat_html += f"""
             <div class="chat-row user-row">
                 <div class="chat-bubble user-bubble">{msg['content']}</div>
             </div>
-            """, unsafe_allow_html=True)
+            """
         else:
-            st.markdown(f"""
+            chat_html += f"""
             <div class="chat-row bot-row">
                 <div class="chat-bubble bot-bubble">{msg['content']}</div>
             </div>
-            """, unsafe_allow_html=True)
-            
-    # Spacer to push content up from sticky input
-    st.markdown("<div style='height: 150px;'></div>", unsafe_allow_html=True)
+            """
+    
+    chat_html += '</div>'
+    st.markdown(chat_html, unsafe_allow_html=True)
 
 # ------------------------------------------
 # ⌨️ GLOBAL CHAT INPUT
@@ -278,6 +268,9 @@ with chat_col:
 if prompt := st.chat_input("Ask about your data..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_memory("user", prompt)
+    
+    # Force rerun to show user message immediately
+    # (We can't rely on the logic flow because we just injected HTML above)
     
     try:
         client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
