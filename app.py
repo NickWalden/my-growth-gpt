@@ -9,45 +9,30 @@ import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
-# --- 1. CONFIGURATION ---
+# --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
     page_title="Growth OS",
     page_icon="",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-AI_MODEL = "gpt-4o" # Change to "gpt-5.1" if available
 
-# --- 2. MEMORY FUNCTIONS (With Meta-Data Support) ---
+# --- 2. MEMORY FUNCTIONS ---
 def load_memory():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         df = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         if df.empty or "role" not in df.columns: return []
-        
-        # Parse out suggestions if hidden in content
-        records = df.to_dict("records")
-        for r in records:
-            if "|||" in r['content']:
-                parts = r['content'].split("|||")
-                r['content'] = parts[0]
-                try: r['suggestions'] = json.loads(parts[1])
-                except: r['suggestions'] = []
-        return records
+        return df.to_dict("records")
     except Exception: return []
 
-def save_memory(role, content, suggestions=None):
+def save_memory(role, content):
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         try: existing_data = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
         except Exception: existing_data = pd.DataFrame(columns=["timestamp", "role", "content"])
-        
-        # Serialize suggestions into content string for persistence
-        save_content = content
-        if suggestions:
-            save_content = f"{content}|||{json.dumps(suggestions)}"
-            
-        new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": save_content}])
+        if isinstance(content, dict): content = json.dumps(content)
+        new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": content}])
         updated_data = pd.concat([existing_data, new_row], ignore_index=True)
         conn.update(worksheet="ChatHistory", data=updated_data)
     except Exception: pass
@@ -250,26 +235,16 @@ def generate_briefing(ctx, s_data, m_data):
             "top_products": [p[0] for p in s_data['top_products']],
             "campaigns": m_data['campaign_df'].to_dict('records')
         }
-        system_prompt = """
-        You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys:
-        {
-            "headline": "A short, punchy 1-sentence summary.",
-            "wins": ["Bullet 1", "Bullet 2"],
-            "warnings": ["Bullet 1", "Bullet 2"],
-            "action_plan": "One clear strategic recommendation.",
-            "suggested_questions": ["Question 1 (Short)", "Question 2 (Short)", "Question 3 (Short)"]
-        }
-        Return RAW JSON only. No markdown.
-        """
-        response = client.chat.completions.create(model=AI_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload)}], response_format={"type": "json_object"})
+        system_prompt = """You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys: {"headline": "A short, punchy 1-sentence summary.", "wins": ["Bullet 1", "Bullet 2"], "warnings": ["Bullet 1", "Bullet 2"], "action_plan": "One clear strategic recommendation.", "suggested_questions": ["Question 1 (Short)", "Question 2 (Short)", "Question 3 (Short)"]} Do not include markdown formatting. Return RAW JSON only."""
+        response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload)}], response_format={"type": "json_object"})
         return json.loads(response.choices[0].message.content)
     except Exception: return {"headline": "Analysis Unavailable", "wins": [], "warnings": [], "action_plan": "Check API keys.", "suggested_questions": []}
 
 # --- 5. APP STATE ---
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
+if 'briefing' not in st.session_state: st.session_state.briefing = None
 if 'logs' not in st.session_state: st.session_state.logs = []
 if 'last_synced_dates' not in st.session_state: st.session_state.last_synced_dates = None
-if 'trigger_ai_response' not in st.session_state: st.session_state.trigger_ai_response = False
 
 # --- 6. LAYOUT ---
 header_col1, header_col2 = st.columns([5, 2], gap="medium")
@@ -330,9 +305,10 @@ def run_sync_logic():
                 }
                 st.session_state['context'] = ctx
                 
-                # GENERATE BRIEFING & ADD TO CHAT
+                # GENERATE BRIEFING
                 briefing = generate_briefing(ctx, shop_data, meta_data)
                 
+                # Create HTML String for Chat
                 wins_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in briefing.get('wins', [])])
                 warn_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in briefing.get('warnings', [])])
                 
@@ -349,7 +325,6 @@ def run_sync_logic():
                 </div>
                 """
                 
-                # Attach suggestions to the message object for rendering later
                 st.session_state.messages.append({
                     "role": "assistant", 
                     "content": briefing_html, 
@@ -410,9 +385,11 @@ st.markdown(f"""
     .list-metrics {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; text-align: right; min-width: 250px; font-size: 11px; color: #888; }}
     .list-val {{ font-size: 13px; font-weight: 600; color: #eee; }}
     .list-badge {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; margin-left: 10px; }}
+    
+    /* BRIEFING CARD */
     .briefing-card {{ background: #1E1E1E; border: 1px solid #0A84FF; border-radius: 12px; padding: 15px; margin-bottom: 20px; }}
-    .briefing-head {{ color: #0A84FF; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; }}
-    .briefing-item {{ margin-bottom: 4px; display: flex; align-items: flex-start; }}
+    .briefing-head {{ color: #0A84FF; font-weight: 700; font-size: 14px; margin-bottom: 8px; display: flex; align-items: center; }}
+    .briefing-item {{ font-size: 13px; margin-bottom: 4px; display: flex; align-items: flex-start; }}
     .briefing-icon {{ margin-right: 8px; }}
     a {{ text-decoration: none; color: inherit; }}
     
@@ -435,13 +412,21 @@ with dash_col:
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            
+            # 1. Row 1 (Revenue, Orders, AOV, True Profit)
+            c1, c2, c3, c4 = st.columns(4)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
             c2.metric("Orders", f"{s_data['order_count']:,}")
-            c3.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
-            c4.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
-            c5.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
-            c6.metric("FB ROAS", f"{ctx['roas']:.2f}x")
+            c3.metric("AOV", f"${s_data['aov']:.2f}")
+            c4.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
+            
+            # 2. Row 2 (Ad Spend, MER, nCPA, ROAS)
+            c5, c6, c7, c8 = st.columns(4)
+            c5.metric("Ad Spend", f"${m_data['total_spend']:,.0f}")
+            c6.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
+            c7.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
+            c8.metric("FB ROAS", f"{ctx['roas']:.2f}x")
+            
             st.markdown("---")
             
             tab1, tab2, tab3, tab4 = st.tabs(["Growth (New vs Ret)", "Profit Chart", "Creative Gallery", "Campaigns"])
@@ -500,7 +485,7 @@ with chat_col:
             else:
                 if "<div" in msg['content']: 
                     st.markdown(msg['content'], unsafe_allow_html=True)
-                    # Render suggestions if they exist in this message
+                    # Render suggestions
                     if msg.get('suggestions'):
                         cols = st.columns(len(msg['suggestions']))
                         for idx, sug in enumerate(msg['suggestions']):
@@ -511,13 +496,12 @@ with chat_col:
                     st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
         st.markdown('<div id="end-of-chat"></div>', unsafe_allow_html=True)
 
-# Handle Triggered Prompt (From Buttons)
+# Handle Triggered Prompt
 if 'trigger_prompt' in st.session_state and st.session_state.trigger_prompt:
     prompt = st.session_state.trigger_prompt
-    st.session_state.trigger_prompt = None # Reset
+    st.session_state.trigger_prompt = None 
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_memory("user", prompt)
-    # Flag to run AI generation immediately below
     run_ai = True
 else:
     prompt = st.chat_input("Ask about your data...")
@@ -559,8 +543,7 @@ js = f"""
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }}
     }}
-    // Run on load and slightly after to catch image loads
-    scrollBottom();
+    setTimeout(scrollBottom, 100);
     setTimeout(scrollBottom, 500);
     setTimeout(scrollBottom, 1000);
 </script>
