@@ -5,7 +5,6 @@ import requests
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
-from collections import Counter
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
@@ -34,8 +33,7 @@ def save_memory(role, content):
         conn.update(worksheet="ChatHistory", data=updated_data)
     except Exception: pass
 
-# --- 3. PRO DATA FETCHING ---
-
+# --- 3. DATA FETCHING ---
 def fetch_shopify_data(domain, token):
     try:
         last_30 = (datetime.now() - timedelta(days=30)).isoformat()
@@ -45,70 +43,45 @@ def fetch_shopify_data(domain, token):
         
         if res.status_code == 200:
             orders = res.json().get('orders', [])
-            
-            # 1. Sales Trend
             daily_data = {}
-            # 2. Product Breakdown
             product_sales = {}
-            
             total_revenue = 0
             
             for o in orders:
-                # Daily Trend
                 date = o['created_at'][:10]
                 val = float(o['total_price'])
                 daily_data[date] = daily_data.get(date, 0) + val
                 total_revenue += val
-                
-                # Top Products
                 for item in o.get('line_items', []):
                     p_name = item['title']
                     p_rev = float(item['price']) * item['quantity']
                     product_sales[p_name] = product_sales.get(p_name, 0) + p_rev
 
-            # Format Daily DataFrame
             df_daily = pd.DataFrame(list(daily_data.items()), columns=['date', 'sales'])
             df_daily['date'] = pd.to_datetime(df_daily['date'])
-            
-            # Format Top Products
             sorted_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:5]
             
             return {
                 "daily_df": df_daily,
                 "total_sales": total_revenue,
-                "top_products": sorted_products, # List of (Name, Revenue)
+                "top_products": sorted_products,
                 "order_count": len(orders),
                 "aov": total_revenue / len(orders) if len(orders) > 0 else 0
             }, None
-        else:
-            return None, f"Shopify Error {res.status_code}: {res.text}"
+        else: return None, f"Shopify Error {res.status_code}: {res.text}"
     except Exception as e: return None, f"Shopify Crash: {e}"
 
 def fetch_meta_data(token, account_id):
     try:
-        # We fetch CAMPAIGN level for the Dashboard
-        # AND AD level for the AI Analysis
         base_url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
-        
-        # 1. Campaign Request
-        cmp_params = {
-            'access_token': token, 'date_preset': 'last_30d', 'level': 'campaign',
-            'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc'
-        }
+        cmp_params = {'access_token': token, 'date_preset': 'last_30d', 'level': 'campaign', 'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc'}
         cmp_res = requests.get(base_url, params=cmp_params)
-        
-        # 2. Ad Level Request (For AI Context)
-        ad_params = {
-            'access_token': token, 'date_preset': 'last_7d', 'level': 'ad',
-            'fields': 'ad_name,spend,ctr,cpm,action_values', 'limit': 20
-        }
+        ad_params = {'access_token': token, 'date_preset': 'last_7d', 'level': 'ad', 'fields': 'ad_name,spend,ctr,cpm,action_values', 'limit': 20}
         ad_res = requests.get(base_url, params=ad_params)
 
         if cmp_res.status_code == 200 and ad_res.status_code == 200:
             cmp_data = cmp_res.json().get('data', [])
             ad_data = ad_res.json().get('data', [])
-            
-            # Process Campaigns
             campaigns = []
             total_spend = 0
             for c in cmp_data:
@@ -116,32 +89,19 @@ def fetch_meta_data(token, account_id):
                 total_spend += spend
                 actions = c.get('action_values', [])
                 sales_val = sum([float(a['value']) for a in actions if a['action_type'] == 'purchase']) if actions else 0
-                campaigns.append({
-                    "Campaign": c.get('campaign_name'),
-                    "Spend": spend,
-                    "Sales": sales_val,
-                    "ROAS": round(sales_val/spend, 2) if spend>0 else 0,
-                    "CTR": float(c.get('ctr', 0)),
-                    "CPM": float(c.get('cpm', 0))
-                })
+                campaigns.append({"Campaign": c.get('campaign_name'), "Spend": spend, "Sales": sales_val, "ROAS": round(sales_val/spend, 2) if spend>0 else 0, "CTR": float(c.get('ctr', 0)), "CPM": float(c.get('cpm', 0))})
             
-            # Process Top Ads (For AI)
             top_ads = []
             for a in ad_data:
                 spend = float(a.get('spend', 0))
-                if spend > 0: # Only look at active ads
+                if spend > 0:
                     actions = a.get('action_values', [])
                     sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
                     roas = round(sales_val/spend, 2)
                     top_ads.append(f"{a['ad_name']} | Spend:${spend:.0f} | ROAS:{roas}x | CTR:{a.get('ctr')}%")
 
-            return {
-                "campaign_df": pd.DataFrame(campaigns),
-                "total_spend": total_spend,
-                "top_ads_list": top_ads # List of strings for AI prompt
-            }, None
-        else:
-            return None, f"Meta Error: {cmp_res.text}"
+            return {"campaign_df": pd.DataFrame(campaigns), "total_spend": total_spend, "top_ads_list": top_ads}, None
+        else: return None, f"Meta Error: {cmp_res.text}"
     except Exception as e: return None, f"Meta Crash: {e}"
 
 # --- 4. APP STATE ---
@@ -161,24 +121,14 @@ with st.sidebar:
             try:
                 s_domain, s_token = st.secrets["SHOPIFY_DOMAIN"], st.secrets["SHOPIFY_TOKEN"]
                 m_token, m_id = st.secrets["META_TOKEN"], st.secrets["META_ACCOUNT_ID"]
-                
                 shop_data, s_err = fetch_shopify_data(s_domain, s_token)
                 meta_data, m_err = fetch_meta_data(m_token, m_id)
-                
                 if s_err: st.session_state.logs.append(s_err)
                 if m_err: st.session_state.logs.append(m_err)
-
                 if shop_data and meta_data:
-                    # Calculate Blended Metrics
                     ts = shop_data['total_sales']
                     tsp = meta_data['total_spend']
-                    roas = ts / tsp if tsp > 0 else 0
-                    
-                    st.session_state['context'] = {
-                        "shopify": shop_data,
-                        "meta": meta_data,
-                        "roas": roas
-                    }
+                    st.session_state['context'] = {"shopify": shop_data, "meta": meta_data, "roas": ts / tsp if tsp > 0 else 0}
                     if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
                 else: st.toast("Sync Failed", icon="⚠️")
             except Exception as e: st.session_state.logs.append(f"Config Error: {e}")
@@ -192,7 +142,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# --- 6. CSS STYLING ---
+# --- 6. CSS STYLING (FIXED HEADER) ---
 st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
@@ -203,20 +153,38 @@ st.markdown(f"""
         height: 100vh;
         overflow: hidden !important; 
     }}
-    header[data-testid="stHeader"] {{ display: none; }}
-    .block-container {{ max-width: 100%; padding: 1rem 1rem 0 1rem; height: 100vh; overflow: hidden !important; }}
-    div[data-testid="column"] {{ height: 94vh; overflow-y: auto; overflow-x: hidden; display: block; }}
+    
+    /* --- FIX: RESTORE HEADER BUT MAKE TRANSPARENT --- */
+    header[data-testid="stHeader"] {{
+        background-color: transparent !important;
+        z-index: 100; /* Ensure button is clickable */
+    }}
+    /* Hide the red decoration line */
+    header[data-testid="stHeader"] .decoration {{ display: none; }}
+
+    .block-container {{ max-width: 100%; padding: 3rem 1rem 0 1rem; height: 100vh; overflow: hidden !important; }}
+    
+    /* Columns & Scrolling */
+    div[data-testid="column"] {{ height: 90vh; overflow-y: auto; overflow-x: hidden; display: block; }}
     div[data-testid="column"]:nth-of-type(2) > div {{ padding-bottom: 150px !important; }}
+
+    /* Input Position */
     [data-testid="stChatInput"] {{
         position: fixed !important; bottom: 0 !important; right: 1.5rem !important; left: auto !important;
         width: {chat_width_pct-2}% !important; min-width: 300px;
         background-color: #111111 !important; z-index: 9999 !important;
         border-top: 1px solid #333; padding-top: 15px !important; padding-bottom: 25px !important;
     }}
+    
+    /* Text Sizing */
     .chat-bubble, .chat-bubble * {{ font-size: {font_size}px !important; line-height: 1.5; }}
+    
+    /* Bubbles */
     .chat-bubble {{ padding: 12px 16px; border-radius: 18px; max-width: 85%; position: relative; word-wrap: break-word; margin-bottom: 4px; display: inline-block; }}
     .user-bubble {{ background-color: #0A84FF; color: white; border-bottom-right-radius: 2px; }}
     .bot-bubble {{ background-color: #262626; color: #E5E5EA; border: 1px solid #333; border-bottom-left-radius: 2px; }}
+    
+    /* Utilities */
     .chat-row {{ display: flex; margin-bottom: 12px; width: 100%; }}
     .user-row {{ justify-content: flex-end; }}
     .bot-row {{ justify-content: flex-start; }}
@@ -238,7 +206,6 @@ with dash_col:
             s_data = ctx['shopify']
             m_data = ctx['meta']
             
-            # Metrics
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Revenue (30d)", f"${s_data['total_sales']:,.0f}")
             c2.metric("Spend (30d)", f"${m_data['total_spend']:,.0f}")
@@ -247,7 +214,6 @@ with dash_col:
 
             st.markdown("---")
             
-            # Top Products & Chart
             c_chart, c_prod = st.columns([2, 1])
             with c_chart:
                 st.subheader("Sales Trend")
@@ -263,20 +229,8 @@ with dash_col:
                     st.caption(f"${rev:,.0f} revenue")
                     st.progress(min(rev / (s_data['total_sales'] or 1), 1.0))
 
-            # Campaign Table
             st.subheader("Campaign Performance")
-            st.dataframe(
-                m_data['campaign_df'].sort_values("Spend", ascending=False),
-                column_config={
-                    "Spend": st.column_config.NumberColumn(format="$%.0f"),
-                    "Sales": st.column_config.NumberColumn(format="$%.0f"),
-                    "ROAS": st.column_config.NumberColumn(format="%.2fx"),
-                    "CTR": st.column_config.NumberColumn(format="%.2f%%"),
-                    "CPM": st.column_config.NumberColumn(format="$%.2f")
-                },
-                hide_index=True,
-                use_container_width=True
-            )
+            st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
             st.markdown("<br><br><br>", unsafe_allow_html=True)
         else:
             st.info("👈 Sync Data from the sidebar to begin.")
@@ -298,56 +252,17 @@ if prompt := st.chat_input("Ask about your data..."):
     
     try:
         client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-        
-        # --- BUILD PRO CONTEXT ---
         context_str = ""
         if 'context' in st.session_state:
             ctx = st.session_state['context']
-            s_data = ctx['shopify']
-            m_data = ctx['meta']
-            
-            # 1. Product Context
+            s_data, m_data = ctx['shopify'], ctx['meta']
             top_prods = "\n".join([f"- {n}: ${r:.0f}" for n, r in s_data['top_products']])
-            
-            # 2. Ad Context (Granular)
             top_ads = "\n".join(m_data['top_ads_list'])
-            
-            context_str = f"""
-            OVERVIEW:
-            - Total Sales: ${s_data['total_sales']}
-            - Total Spend: ${m_data['total_spend']}
-            - ROAS: {ctx['roas']:.2f}x
-            - AOV: ${s_data['aov']:.2f}
-            
-            TOP SELLING PRODUCTS:
-            {top_prods}
-            
-            RECENT TOP ADS (Last 7 Days):
-            {top_ads}
-            
-            CAMPAIGN DATA:
-            {m_data['campaign_df'].to_string(index=False)}
-            """
+            context_str = f"OVERVIEW:\nTotal Sales: ${s_data['total_sales']}\nTotal Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\nAOV: ${s_data['aov']:.2f}\n\nTOP PRODUCTS:\n{top_prods}\n\nRECENT ADS:\n{top_ads}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
         
         history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
-        final_prompt = f"""
-        You are a Senior Media Buyer & eCommerce Strategist.
-        You have access to the user's live data below.
-        
-        When answering:
-        1. Reference specific Campaign names, Ad names, or Product names from the data.
-        2. Look at CTR and CPM to diagnose "Why" performance is good/bad.
-        3. Suggest pivoting spend to specific top-selling products if ads are failing.
-        
-        DATA:
-        {context_str}
-        """
-        
-        stream = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "system", "content": final_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history],
-            stream=True
-        )
+        final_prompt = f"You are a Senior Media Buyer. Use this data to answer:\n{context_str}"
+        stream = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": final_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history], stream=True)
         
         response_text = ""
         for chunk in stream:
@@ -357,5 +272,4 @@ if prompt := st.chat_input("Ask about your data..."):
         st.session_state.messages.append({"role": "assistant", "content": response_text})
         save_memory("assistant", response_text)
         st.rerun()
-        
     except Exception as e: st.error(f"Error: {e}")
