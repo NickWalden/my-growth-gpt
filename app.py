@@ -44,15 +44,12 @@ def get_product_costs(domain, token, variant_ids):
         headers = {"X-Shopify-Access-Token": token}
         for chunk in chunks:
             ids_str = ",".join(map(str, chunk))
-            # 1. Get Inventory Item IDs
             url = f"https://{domain}/admin/api/2023-10/variants.json?ids={ids_str}&fields=id,inventory_item_id"
             res = requests.get(url, headers=headers)
             if res.status_code == 200:
                 vars = res.json().get('variants', [])
                 inv_ids = [v['inventory_item_id'] for v in vars]
                 var_map = {v['inventory_item_id']: v['id'] for v in vars}
-                
-                # 2. Get Costs
                 if inv_ids:
                     inv_str = ",".join(map(str, inv_ids))
                     url2 = f"https://{domain}/admin/api/2023-10/inventory_items.json?ids={inv_str}&fields=id,cost"
@@ -72,11 +69,8 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
         url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&created_at_min={start_iso}&created_at_max={end_iso}&limit=250"
         headers = {"X-Shopify-Access-Token": token}
         res = requests.get(url, headers=headers)
-        
         if res.status_code == 200:
             orders = res.json().get('orders', [])
-            
-            # Fetch Real Costs
             all_vids = set()
             for o in orders:
                 for i in o.get('line_items', []):
@@ -87,7 +81,6 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
             prod_sales = {}
             total_rev = 0
             total_cogs = 0
-            
             for o in orders:
                 date = o['created_at'][:10]
                 if date not in daily_map: daily_map[date] = {'sales': 0, 'cogs': 0}
@@ -100,7 +93,6 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
                     cost = real_costs.get(vid, price * (1 - fallback_margin))
                     cogs += (cost * qty)
                     prod_sales[i['title']] = prod_sales.get(i['title'], 0) + (price * qty)
-                
                 daily_map[date]['sales'] += rev
                 daily_map[date]['cogs'] += cogs
                 total_rev += rev
@@ -110,11 +102,8 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
             if not df_daily.empty:
                 df_daily['date'] = pd.to_datetime(df_daily['date'])
                 df_daily = df_daily.sort_values('date')
-                
             return {
-                "daily_df": df_daily,
-                "total_sales": total_rev,
-                "total_cogs": total_cogs,
+                "daily_df": df_daily, "total_sales": total_rev, "total_cogs": total_cogs,
                 "top_products": sorted(prod_sales.items(), key=lambda x: x[1], reverse=True)[:5],
                 "aov": total_rev / len(orders) if len(orders) > 0 else 0
             }, None
@@ -122,18 +111,17 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
     except Exception as e: return None, f"Shopify Crash: {e}"
 
 def get_creative_images(token, creative_ids):
-    """Batched fetch of ad images"""
     if not creative_ids: return {}
     url_map = {}
     try:
-        # Request fields
-        ids_str = ",".join(creative_ids[:50]) # Limit to 50 for safety
+        # Limit to 50 IDs at a time
+        ids_str = ",".join(creative_ids[:50])
+        # We explicitly ask for the image URL or the video thumbnail URL
         url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=thumbnail_url,image_url,name&access_token={token}"
         res = requests.get(url)
         if res.status_code == 200:
             data = res.json()
             for cid, val in data.items():
-                # Prefer thumbnail, fallback to image_url
                 url_map[cid] = val.get('thumbnail_url') or val.get('image_url')
     except Exception: pass
     return url_map
@@ -151,22 +139,28 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         daily_params = {'access_token': token, 'time_range': time_range, 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100}
         daily_res = requests.get(base_url, params=daily_params)
         
-        # 3. Ad Level (For Gallery & Context)
-        ad_params = {'access_token': token, 'time_range': time_range, 'level': 'ad', 'fields': 'ad_name,creative{id},spend,ctr,cpm,action_values', 'limit': 20, 'sort': ['spend_descending']}
+        # 3. Ad Level (FIXED: Added 'creative' to fields)
+        ad_start = (end_date - timedelta(days=7)).strftime('%Y-%m-%d')
+        if start_date > datetime.strptime(ad_start, '%Y-%m-%d').date(): ad_start = start_date.strftime('%Y-%m-%d')
+        ad_range = json.dumps({'since': ad_start, 'until': end_date.strftime('%Y-%m-%d')})
+        
+        ad_params = {
+            'access_token': token, 'time_range': ad_range, 'level': 'ad',
+            'fields': 'ad_name,creative,spend,ctr,cpm,action_values', # <--- FIXED HERE
+            'limit': 20, 'sort': ['spend_descending']
+        }
         ad_res = requests.get(base_url, params=ad_params)
 
         if cmp_res.status_code == 200 and daily_res.status_code == 200:
             cmp_data = cmp_res.json().get('data', [])
             daily_data = daily_res.json().get('data', [])
-            ad_data = ad_res.json().get('data', [])
+            ad_data = ad_res.json().get('data', []) if ad_res.status_code == 200 else []
             
-            # Process Daily
             daily_spend = [{'date': d['date_start'], 'spend': float(d['spend'])} for d in daily_data]
             df_daily_spend = pd.DataFrame(daily_spend)
             if not df_daily_spend.empty: df_daily_spend['date'] = pd.to_datetime(df_daily_spend['date'])
             total_spend = sum([d['spend'] for d in daily_spend])
 
-            # Process Campaigns
             campaigns = []
             for c in cmp_data:
                 spend = float(c.get('spend', 0))
@@ -174,25 +168,21 @@ def fetch_meta_data(token, account_id, start_date, end_date):
                 sales_val = sum([float(a['value']) for a in actions if a['action_type'] == 'purchase']) if actions else 0
                 campaigns.append({"Campaign": c.get('campaign_name'), "Spend": spend, "Sales": sales_val, "ROAS": round(sales_val/spend, 2) if spend>0 else 0, "CTR": float(c.get('ctr', 0))})
             
-            # Process Ad Gallery
+            # Process Gallery
             gallery_ads = []
             creative_ids = []
-            
             for a in ad_data:
                 spend = float(a.get('spend', 0))
                 if spend > 0:
                     actions = a.get('action_values', [])
                     sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
+                    # Extract Creative ID safely
                     cid = a.get('creative', {}).get('id')
                     if cid: creative_ids.append(cid)
                     
                     gallery_ads.append({
-                        "name": a['ad_name'],
-                        "spend": spend,
-                        "roas": round(sales_val/spend, 2) if spend>0 else 0,
-                        "ctr": float(a.get('ctr', 0)),
-                        "cpm": float(a.get('cpm', 0)),
-                        "creative_id": cid
+                        "name": a['ad_name'], "spend": spend, "roas": round(sales_val/spend, 2) if spend>0 else 0,
+                        "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0)), "creative_id": cid
                     })
             
             # Fetch Images
@@ -201,10 +191,8 @@ def fetch_meta_data(token, account_id, start_date, end_date):
                 ad['image_url'] = image_map.get(ad['creative_id'])
 
             return {
-                "campaign_df": pd.DataFrame(campaigns),
-                "daily_spend_df": df_daily_spend,
-                "total_spend": total_spend,
-                "gallery_ads": gallery_ads # List of dicts
+                "campaign_df": pd.DataFrame(campaigns), "daily_spend_df": df_daily_spend,
+                "total_spend": total_spend, "gallery_ads": gallery_ads
             }, None
         else: return None, f"Meta Error: {daily_res.text}"
     except Exception as e: return None, f"Meta Crash: {e}"
@@ -217,20 +205,15 @@ if 'last_synced_dates' not in st.session_state: st.session_state.last_synced_dat
 # --- 5. SIDEBAR ---
 with st.sidebar:
     st.markdown("### ⚙️ Settings")
-    
     preset = st.selectbox("Date Range", ["Last 7 Days", "Last 30 Days", "This Month", "Last Month", "Custom"], index=1)
     today = datetime.now().date()
     if preset == "Last 7 Days": s_d, e_d = today - timedelta(days=7), today
     elif preset == "Last 30 Days": s_d, e_d = today - timedelta(days=30), today
     elif preset == "This Month": s_d, e_d = today.replace(day=1), today
     elif preset == "Last Month": 
-        first = today.replace(day=1)
-        e_d = first - timedelta(days=1)
-        s_d = e_d.replace(day=1)
+        first = today.replace(day=1); e_d = first - timedelta(days=1); s_d = e_d.replace(day=1)
     else: 
-        cols = st.columns(2)
-        s_d = cols[0].date_input("Start", value=today - timedelta(days=30))
-        e_d = cols[1].date_input("End", value=today)
+        cols = st.columns(2); s_d = cols[0].date_input("Start", value=today - timedelta(days=30)); e_d = cols[1].date_input("End", value=today)
 
     st.divider()
     chat_width_pct = st.slider("Chat Width", 20, 60, 35, 5, format="%d%%")
@@ -244,13 +227,10 @@ with st.sidebar:
             try:
                 s_domain, s_token = st.secrets["SHOPIFY_DOMAIN"], st.secrets["SHOPIFY_TOKEN"]
                 m_token, m_id = st.secrets["META_TOKEN"], st.secrets["META_ACCOUNT_ID"]
-                
                 shop_data, s_err = fetch_shopify_data(s_domain, s_token, margin_pct, s_d, e_d)
                 meta_data, m_err = fetch_meta_data(m_token, m_id, s_d, e_d)
-                
                 if s_err: st.session_state.logs.append(s_err)
                 if m_err: st.session_state.logs.append(m_err)
-
                 if shop_data and meta_data:
                     df_s, df_m = shop_data['daily_df'], meta_data['daily_spend_df']
                     if not df_s.empty and not df_m.empty:
@@ -259,10 +239,7 @@ with st.sidebar:
                         df_merged['net_profit'] = df_merged['gross_profit'] - df_merged['spend']
                         df_merged = df_merged.sort_values('date')
                         total_net_profit = df_merged['net_profit'].sum()
-                    else:
-                        df_merged = pd.DataFrame()
-                        total_net_profit = 0
-
+                    else: df_merged = pd.DataFrame(); total_net_profit = 0
                     st.session_state['context'] = {
                         "shopify": shop_data, "meta": meta_data, "profit_df": df_merged,
                         "total_net_profit": total_net_profit, "date_range": f"{s_d} to {e_d}",
@@ -279,17 +256,17 @@ with st.sidebar:
         with st.expander(f"⚠️ Logs ({len(st.session_state.logs)})"):
             for err in st.session_state.logs: st.error(err)
     st.divider()
-    if st.button("Clear Memory", type="secondary", use_container_width=True):
-        st.session_state.messages = []
-        st.rerun()
+    if st.button("Clear Memory", type="secondary", use_container_width=True): st.session_state.messages = []; st.rerun()
 
-# --- 6. CSS (GALLERY CARDS) ---
+# --- 6. CSS ---
 st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; background-color: #000; color: #fff; height: 100vh; overflow: hidden !important; }}
+    
     header[data-testid="stHeader"] {{ background-color: transparent !important; z-index: 999; }}
     .stApp > header {{ background-color: transparent; }}
+    
     .block-container {{ max-width: 100%; padding: 4rem 1rem 0 1rem; height: 100vh; overflow: hidden !important; }}
     div[data-testid="column"] {{ height: 90vh; overflow-y: auto; overflow-x: hidden; display: block; }}
     div[data-testid="column"]:nth-of-type(2) > div {{ padding-bottom: 150px !important; }}
@@ -303,27 +280,14 @@ st.markdown(f"""
     .bot-row {{ justify-content: flex-start; }}
     div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
     
-    /* --- GALLERY CARD STYLING --- */
-    .ad-card {{
-        background-color: #111;
-        border: 1px solid #222;
-        border-radius: 12px;
-        overflow: hidden;
-        margin-bottom: 20px;
-        transition: transform 0.2s;
-    }}
+    /* GALLERY STYLES */
+    .ad-card {{ background-color: #111; border: 1px solid #222; border-radius: 12px; overflow: hidden; margin-bottom: 20px; transition: transform 0.2s; }}
     .ad-card:hover {{ border-color: #444; transform: translateY(-2px); }}
-    .ad-image {{
-        width: 100%;
-        height: 180px;
-        object-fit: cover;
-        border-bottom: 1px solid #222;
-    }}
+    .ad-image {{ width: 100%; height: 180px; object-fit: cover; border-bottom: 1px solid #222; }}
     .ad-content {{ padding: 12px; }}
     .ad-title {{ font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
     .ad-metrics {{ display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #888; }}
     .roas-badge {{ background-color: rgba(0, 200, 83, 0.2); color: #00E676; padding: 2px 6px; border-radius: 4px; font-weight: 600; }}
-    .spend-text {{ color: #ccc; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -347,7 +311,6 @@ with dash_col:
             c4.metric("COGS Source", "Real COGS" if s_data['total_cogs'] > 0 else f"Est. {margin_pct*100}%")
             st.markdown("---")
             
-            # --- TABS FOR VIEWS ---
             tab1, tab2, tab3 = st.tabs(["Profit Chart", "Creative Gallery", "Campaigns"])
             
             with tab1:
@@ -360,10 +323,9 @@ with dash_col:
                     st.plotly_chart(fig, use_container_width=True)
             
             with tab2:
-                # --- VISUAL CREATIVE GALLERY ---
-                ads = m_data['gallery_ads']
+                ads = m_data.get('gallery_ads', [])
                 if ads:
-                    cols = st.columns(3) # 3 Column Grid
+                    cols = st.columns(3)
                     for i, ad in enumerate(ads):
                         with cols[i % 3]:
                             img_src = ad.get('image_url') or "https://via.placeholder.com/300x200/222/888?text=No+Image"
@@ -373,21 +335,17 @@ with dash_col:
                                 <div class="ad-content">
                                     <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
                                     <div class="ad-metrics">
-                                        <span class="spend-text">${ad['spend']:,.0f} spent</span>
+                                        <span>${ad['spend']:,.0f}</span>
                                         <span class="roas-badge">{ad['roas']}x ROAS</span>
                                     </div>
                                 </div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                else:
-                    st.info("No active ad creatives found for this period.")
+                            </div>""", unsafe_allow_html=True)
+                else: st.info("No active creatives found.")
 
             with tab3:
                 st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
-            
             st.markdown("<br><br><br>", unsafe_allow_html=True)
-        else:
-            st.info("👈 Select Date Range to begin.")
+        else: st.info("👈 Select Date Range to begin.")
 
 # --- RIGHT: CHAT ---
 with chat_col:
@@ -399,7 +357,6 @@ with chat_col:
                 st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
         st.markdown("<br><br><br>", unsafe_allow_html=True)
 
-# --- INPUT ---
 if prompt := st.chat_input("Ask about your data..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_memory("user", prompt)
@@ -409,8 +366,8 @@ if prompt := st.chat_input("Ask about your data..."):
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
-            ads_txt = "\n".join([f"{a['name']}: {a['roas']}x ROAS (${a['spend']} spend)" for a in m_data['gallery_ads'][:10]])
-            context_str = f"OVERVIEW:\nNet Profit: ${ctx['total_net_profit']}\nRevenue: ${s_data['total_sales']}\nAd Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\n\nTOP ADS:\n{ads_txt}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
+            ads_txt = "\n".join([f"{a['name']}: {a['roas']}x ROAS (${a['spend']})" for a in m_data['gallery_ads'][:10]])
+            context_str = f"OVERVIEW:\nNet Profit: ${ctx['total_net_profit']:,.2f}\nRevenue: ${s_data['total_sales']}\nAd Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\n\nTOP ADS:\n{ads_txt}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
         
         history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
         final_prompt = f"You are a Senior Media Buyer. Use this data:\n{context_str}"
