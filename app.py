@@ -197,11 +197,9 @@ def fetch_meta_data(token, account_id, start_date, end_date):
                 revenue = sum([float(x['value']) for x in action_values if x['action_type'] == 'purchase'])
                 roas = round(revenue/spend, 2) if spend > 0 else 0
                 cpa = round(spend/purchases, 2) if purchases > 0 else 0
-                
                 ad_id = a.get('ad_id') or a.get('id')
                 created = datetime.strptime(a.get('created_time', datetime.now().strftime('%Y-%m-%d')), '%Y-%m-%d')
                 days_live = (datetime.now() - created).days
-                
                 if ad_id:
                     ad_ids_to_fetch.append(ad_id)
                     gallery_ads.append({
@@ -263,14 +261,27 @@ with st.sidebar:
                     df_s, df_m = shop_data['daily_df'], meta_data['daily_spend_df']
                     if not df_s.empty and not df_m.empty:
                         df_merged = pd.merge(df_s, df_m, on='date', how='outer').fillna(0)
+                        
+                        # --- PROFIT MATH ---
                         df_merged['gross_profit'] = df_merged['sales'] - df_merged['cogs']
                         df_merged['net_profit'] = df_merged['gross_profit'] - df_merged['spend']
+                        
+                        # --- MER MATH ---
+                        # Prevent division by zero
+                        df_merged['mer'] = df_merged.apply(lambda row: row['sales'] / row['spend'] if row['spend'] > 0 else 0, axis=1)
+                        
                         df_merged = df_merged.sort_values('date')
                         total_net_profit = df_merged['net_profit'].sum()
-                    else: df_merged = pd.DataFrame(); total_net_profit = 0
+                        
+                        # Blended MER (Period Total)
+                        blended_mer = shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
+                        
+                    else: df_merged = pd.DataFrame(); total_net_profit = 0; blended_mer = 0
+                    
                     st.session_state['context'] = {
                         "shopify": shop_data, "meta": meta_data, "profit_df": df_merged,
                         "total_net_profit": total_net_profit, "date_range": f"{s_d} to {e_d}",
+                        "blended_mer": blended_mer,
                         "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
                     }
                     st.session_state.last_synced_dates = (s_d, e_d)
@@ -312,24 +323,18 @@ st.markdown(f"""
     .ad-image-container {{ position: relative; width: 100%; height: 220px; background-color: #000; overflow: hidden; }}
     .ad-bg {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-size: cover; background-position: center; filter: blur(20px) brightness(0.5); z-index: 1; }}
     .ad-image {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }}
-    
-    /* FOOTER GRID */
     .ad-footer {{ background-color: #161616; padding: 12px; border-top: 1px solid #222; flex-grow: 1; }}
     .ad-title {{ font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
     .ad-badge-top {{ position: absolute; top: 8px; right: 8px; z-index: 4; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; backdrop-filter: blur(4px); }}
     .ad-link-icon {{ position: absolute; top: 8px; left: 8px; z-index: 4; padding: 4px; border-radius: 50%; background: rgba(0,0,0,0.6); color: white; backdrop-filter: blur(4px); }}
-    
-    /* NO TEXT DECORATION FOR LINKS */
-    a.ad-link {{ text-decoration: none !important; color: inherit !important; display: block; }}
-    a.ad-link:hover {{ text-decoration: none !important; color: inherit !important; transform: none !important; }}
-    
     .grid-stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 11px; color: #888; }}
     .stat-box {{ margin-bottom: 4px; }}
     .text-val {{ font-weight: 600; color: #eee; font-size: 12px; }}
-    
     .context-tag {{ font-size: 10px; background: #222; padding: 2px 6px; border-radius: 4px; color: #888; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
+    .btn-view {{ display: block; width: 100%; text-align: center; background: #222; color: #ccc; font-size: 11px; padding: 6px 0; border-radius: 6px; margin-top: 8px; transition: background 0.2s; }}
+    .btn-view:hover {{ background: #333; color: white; }}
     
-    /* LIST VIEW STYLES */
+    /* LIST VIEW */
     .list-row {{ display: flex; background: #111; border: 1px solid #222; border-radius: 12px; margin-bottom: 10px; overflow: hidden; transition: all 0.2s; color: inherit; text-decoration: none; }}
     .list-row:hover {{ border-color: #444; transform: translateX(4px); }}
     .list-img {{ width: 100px; height: 100px; object-fit: cover; border-right: 1px solid #222; }}
@@ -338,6 +343,7 @@ st.markdown(f"""
     .list-metrics {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; text-align: right; min-width: 250px; font-size: 11px; color: #888; }}
     .list-val {{ font-size: 13px; font-weight: 600; color: #eee; }}
     .list-badge {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; margin-left: 10px; }}
+    a {{ text-decoration: none; color: inherit; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -357,13 +363,38 @@ with dash_col:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
             c2.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
-            c3.metric("ROAS", f"{ctx['roas']:.2f}x")
+            # CHANGED: Replaced simple ROAS with MER
+            c3.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
             c4.metric("COGS Source", "Real COGS" if s_data['total_cogs'] > 0 else f"Est. {margin_pct*100}%")
             st.markdown("---")
             
-            tab1, tab2, tab3 = st.tabs(["Profit Chart", "Creative Gallery", "Campaigns"])
+            tab1, tab2, tab3, tab4 = st.tabs(["Blended Efficiency", "Profit Chart", "Creative Gallery", "Campaigns"])
             
             with tab1:
+                # --- NEW MER CHART ---
+                df = ctx['profit_df']
+                if not df.empty:
+                    fig = go.Figure()
+                    
+                    # Bar: Revenue
+                    fig.add_trace(go.Bar(x=df['date'], y=df['sales'], name='Revenue', marker_color='#007AFF', opacity=0.4))
+                    
+                    # Line: MER (Secondary Axis)
+                    fig.add_trace(go.Scatter(x=df['date'], y=df['mer'], name='MER', yaxis='y2', line=dict(color='#00E676', width=3)))
+                    
+                    # Threshold Line (3.0 Target)
+                    fig.add_hline(y=3.0, line_dash="dash", line_color="#555", annotation_text="Target (3.0)", annotation_position="bottom right")
+
+                    fig.update_layout(
+                        template="plotly_dark", height=350, 
+                        margin=dict(l=0, r=0, t=30, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
+                        hovermode="x unified", legend=dict(orientation="h", y=1.1),
+                        yaxis=dict(title="Revenue", showgrid=True, gridcolor="#333"),
+                        yaxis2=dict(title="MER", overlaying='y', side='right', showgrid=False)
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            with tab2:
                 df = ctx['profit_df']
                 if not df.empty:
                     fig = go.Figure()
@@ -372,13 +403,10 @@ with dash_col:
                     fig.update_layout(template="plotly_dark", height=350, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', hovermode="x unified", legend=dict(orientation="h", y=1.1))
                     st.plotly_chart(fig, use_container_width=True)
             
-            with tab2:
+            with tab3:
                 col_view, col_sort = st.columns([1, 2])
-                with col_view:
-                    view_mode = st.radio("View", ["Grid", "List"], horizontal=True, label_visibility="collapsed")
-                with col_sort:
-                    sort_mode = st.selectbox("Sort", ["Highest Spend", "Best ROAS", "Most Sales"], label_visibility="collapsed")
-                
+                with col_view: view_mode = st.radio("View", ["Grid", "List"], horizontal=True, label_visibility="collapsed")
+                with col_sort: sort_mode = st.selectbox("Sort", ["Highest Spend", "Best ROAS", "Most Sales"], label_visibility="collapsed")
                 ads = m_data.get('gallery_ads', [])
                 if ads:
                     if sort_mode == "Highest Spend": ads = sorted(ads, key=lambda x: x['spend'], reverse=True)
@@ -394,9 +422,7 @@ with dash_col:
                                 if roas_val >= 3.0: badge_color = "rgba(0, 200, 83, 0.9); color: #fff;"
                                 elif roas_val >= 1.5: badge_color = "rgba(255, 214, 0, 0.9); color: #000;"
                                 else: badge_color = "rgba(255, 61, 0, 0.9); color: #fff;"
-                                
                                 link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
-                                
                                 st.markdown(f"""
                                 <a href="{link}" target="_blank" class="ad-link">
                                     <div class="ad-card">
@@ -420,18 +446,13 @@ with dash_col:
                                             <div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div>
                                         </div>
                                     </div>
-                                </a>
-                                """, unsafe_allow_html=True)
-                    else: # LIST VIEW
+                                </a>""", unsafe_allow_html=True)
+                    else:
                         for ad in ads:
                             img_src = ad.get('image_url') or "https://via.placeholder.com/100x100/222/888?text=Img"
                             roas_val = ad['roas']
-                            if roas_val >= 3.0: badge_color = "#00E676"
-                            elif roas_val >= 1.5: badge_color = "#FFD600"
-                            else: badge_color = "#FF3D00"
-                            
+                            badge_color = "#00E676" if roas_val >= 3.0 else "#FFD600" if roas_val >= 1.5 else "#FF3D00"
                             link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
-                            
                             st.markdown(f"""
                             <a href="{link}" target="_blank" class="ad-link">
                                 <div class="list-row">
@@ -449,12 +470,10 @@ with dash_col:
                                         </div>
                                     </div>
                                 </div>
-                            </a>
-                            """, unsafe_allow_html=True)
-
+                            </a>""", unsafe_allow_html=True)
                 else: st.info("No active creatives found in this date range.")
 
-            with tab3:
+            with tab4:
                 st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
             st.markdown("<br><br><br>", unsafe_allow_html=True)
         else: st.info("👈 Select Date Range to begin.")
@@ -479,7 +498,7 @@ if prompt := st.chat_input("Ask about your data..."):
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
             ads_txt = "\n".join([f"{a['name']}: {a['roas']}x ROAS (${a['spend']})" for a in m_data['gallery_ads'][:10]])
-            context_str = f"OVERVIEW:\nNet Profit: ${ctx['total_net_profit']:,.2f}\nRevenue: ${s_data['total_sales']}\nAd Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\n\nTOP ADS:\n{ads_txt}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
+            context_str = f"OVERVIEW:\nBlended MER: {ctx['blended_mer']:.2f}x\nNet Profit: ${ctx['total_net_profit']:,.2f}\nRevenue: ${s_data['total_sales']}\nAd Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\n\nTOP ADS:\n{ads_txt}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
         
         history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
         final_prompt = f"You are a Senior Media Buyer. Use this data:\n{context_str}"
