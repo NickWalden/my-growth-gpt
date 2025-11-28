@@ -22,15 +22,14 @@ st.markdown("""
     
     html, body, [class*="css"] {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        background-color: #000000; /* True Black Background */
+        background-color: #000000;
         color: #ffffff;
     }
 
-    /* 2. STICKY TABS & HEADER */
-    /* This makes the Tab Bar stick to the top of the screen */
+    /* 2. STICKY TABS */
     .stTabs [data-baseweb="tab-list"] {
         position: sticky;
-        top: 3rem; /* Height of the top decoration */
+        top: 3rem;
         z-index: 10;
         background-color: #000000;
         padding-top: 1rem;
@@ -38,34 +37,45 @@ st.markdown("""
         border-bottom: 1px solid #1C1C1E;
     }
 
-    /* 3. iMESSAGE STYLE CHAT */
-    /* User Message (Right Aligned, Blue) */
-    div[data-testid="stChatMessage"]:nth-child(even) {
+    /* 3. iMESSAGE STYLE CHAT (STAGGERED & FIXED WIDTH) */
+    
+    /* USER MESSAGES (Right Side) */
+    /* We use :has() to detect the user avatar, ensuring alignment is always correct */
+    div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"]) {
         flex-direction: row-reverse;
         text-align: right;
     }
-    div[data-testid="stChatMessage"]:nth-child(even) div[data-testid="stChatMessageContent"] {
+    div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"]) div[data-testid="stChatMessageContent"] {
         background-color: #007AFF !important; /* iOS Blue */
         color: white !important;
-        border-radius: 20px 20px 4px 20px !important; /* Speech Bubble Shape */
-        margin-right: 10px;
+        border-radius: 20px 20px 4px 20px !important;
+        
+        /* THE STAGGERED LOOK FIX */
+        max-width: 70%;         /* Limits width */
+        margin-left: auto;      /* Pushes bubble to the far right */
+        margin-right: 10px;     /* Small gap near avatar */
+        text-align: left;       /* Keeps text readable inside bubble */
     }
 
-    /* Assistant Message (Left Aligned, Grey) */
-    div[data-testid="stChatMessage"]:nth-child(odd) div[data-testid="stChatMessageContent"] {
+    /* ASSISTANT MESSAGES (Left Side) */
+    div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-assistant"]) {
+        flex-direction: row;
+        text-align: left;
+    }
+    div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-assistant"]) div[data-testid="stChatMessageContent"] {
         background-color: #1C1C1E !important; /* iOS Dark Grey */
         border: 1px solid #2C2C2E;
         border-radius: 20px 20px 20px 4px !important;
-        margin-left: 10px;
+        
+        /* THE STAGGERED LOOK FIX */
+        max-width: 70%;         /* Limits width */
+        margin-right: auto;     /* Pushes bubble to the far left */
+        margin-left: 10px;      /* Small gap near avatar */
     }
 
-    /* Avatars */
-    div[data-testid="chatAvatarIcon-user"] {
-        background-color: #1C1C1E !important;
-    }
-    div[data-testid="chatAvatarIcon-assistant"] {
-        background-color: #007AFF !important;
-    }
+    /* AVATAR COLORS */
+    div[data-testid="chatAvatarIcon-user"] { background-color: #1C1C1E !important; }
+    div[data-testid="chatAvatarIcon-assistant"] { background-color: #007AFF !important; }
 
     /* 4. METRICS & CARDS */
     div[data-testid="stMetric"] {
@@ -75,17 +85,9 @@ st.markdown("""
         border-radius: 16px;
     }
     
-    /* 5. SIDEBAR VISIBILITY FIX */
-    /* We hide the red decoration bar but KEEP the hamburger/arrow accessible */
-    header[data-testid="stHeader"] {
-        background-color: transparent;
-    }
-    
-    /* 6. BOTTOM SPACING FOR STICKY INPUT */
-    /* Ensures last message isn't hidden behind input box */
-    .block-container {
-        padding-bottom: 150px;
-    }
+    /* 5. UI CLEANUP */
+    header[data-testid="stHeader"] { background-color: transparent; }
+    .block-container { padding-bottom: 150px; }
 
 </style>
 """, unsafe_allow_html=True)
@@ -95,27 +97,21 @@ def load_memory():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         df = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
-        if df.empty or "role" not in df.columns:
-            return []
+        if df.empty or "role" not in df.columns: return []
         return df.to_dict("records")
-    except Exception:
-        return []
+    except Exception: return []
 
 def save_memory(role, content):
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        try:
-            existing_data = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
-        except Exception:
-            existing_data = pd.DataFrame(columns=["timestamp", "role", "content"])
-
+        try: existing_data = conn.read(worksheet="ChatHistory", usecols=[0, 1, 2], ttl=0)
+        except Exception: existing_data = pd.DataFrame(columns=["timestamp", "role", "content"])
         new_row = pd.DataFrame([{"timestamp": datetime.now().isoformat(), "role": role, "content": content}])
         updated_data = pd.concat([existing_data, new_row], ignore_index=True)
         conn.update(worksheet="ChatHistory", data=updated_data)
-    except Exception:
-        pass
+    except Exception: pass
 
-# --- 4. SILENT DATA FETCHING ---
+# --- 4. DATA FETCHING ---
 def fetch_shopify_daily(domain, token):
     try:
         last_30 = (datetime.now() - timedelta(days=30)).isoformat()
@@ -158,11 +154,9 @@ def fetch_meta_campaigns(token, account_id):
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
 if 'logs' not in st.session_state: st.session_state.logs = []
 
-# SIDEBAR (Minimalist)
+# SIDEBAR
 with st.sidebar:
     st.markdown("### Growth OS")
-    
-    # Primary Refresh Action
     if st.button("🔄 Sync Data", type="primary"):
         with st.spinner("Syncing..."):
             st.session_state.logs = [] 
@@ -186,22 +180,16 @@ with st.sidebar:
                 else: st.toast("Sync Failed. Check Logs.", icon="⚠️")
             except Exception as e: st.session_state.logs.append(f"Config Error: {e}")
 
-    # Silent Log Drawer
     st.markdown("---")
-    log_count = len(st.session_state.logs)
-    if log_count > 0:
-        with st.expander(f"⚠️ System Logs ({log_count})"):
+    if st.session_state.logs:
+        with st.expander(f"⚠️ Logs ({len(st.session_state.logs)})"):
             for err in st.session_state.logs: st.error(err)
     else:
         st.caption("✅ Systems Operational")
-        
     st.markdown("---")
     if st.button("Clear Chat", type="secondary"):
         st.session_state.messages = []
         st.rerun()
-
-# MAIN CONTENT AREA
-# We removed the top header text to save space for sticky tabs
 
 # TAB NAVIGATION
 tab1, tab2 = st.tabs(["Overview", "AI Strategist"])
@@ -210,64 +198,37 @@ tab1, tab2 = st.tabs(["Overview", "AI Strategist"])
 with tab1:
     if 'context' in st.session_state:
         ctx = st.session_state['context']
-        
-        # 1. Metrics Cards
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Revenue (30d)", f"${ctx['total_sales']:,.0f}")
         c2.metric("Ad Spend", f"${ctx['total_spend']:,.0f}")
         c3.metric("ROAS", f"{ctx['roas']:.2f}x", delta="Target: 3.0x")
         c4.metric("Est. Profit", f"${(ctx['total_sales']*0.6 - ctx['total_spend']):,.0f}")
-
+        
         st.markdown("<br>", unsafe_allow_html=True) 
-
-        # 2. Chart
+        
         st.subheader("Sales Velocity")
         if not ctx['daily_sales'].empty:
             fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=ctx['daily_sales']['date'], y=ctx['daily_sales']['sales'],
-                marker_color='#007AFF', marker_line_width=0, opacity=0.9
-            ))
-            fig.update_layout(
-                template="plotly_dark",
-                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                margin=dict(l=0, r=0, t=10, b=0), height=300,
-                xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor='#333')
-            )
+            fig.add_trace(go.Bar(x=ctx['daily_sales']['date'], y=ctx['daily_sales']['sales'], marker_color='#007AFF', marker_line_width=0, opacity=0.9))
+            fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=10, b=0), height=300, xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor='#333'))
             st.plotly_chart(fig, use_container_width=True)
 
-        # 3. Campaign Table
         st.subheader("Active Campaigns")
         if not ctx['campaigns'].empty:
-            st.dataframe(
-                ctx['campaigns'].sort_values("Spend", ascending=False),
-                column_config={
-                    "Spend": st.column_config.NumberColumn(format="$%.0f"),
-                    "Sales": st.column_config.NumberColumn(format="$%.0f"),
-                    "ROAS": st.column_config.NumberColumn(format="%.2fx"),
-                    "Clicks": st.column_config.NumberColumn(format="%d"),
-                },
-                hide_index=True, use_container_width=True
-            )
+            st.dataframe(ctx['campaigns'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "Clicks": st.column_config.NumberColumn(format="%d")}, hide_index=True, use_container_width=True)
     else:
         st.info("Tap 'Sync Data' to initialize dashboard.")
 
 # CHAT TAB
 with tab2:
-    # Sticky container for chat history
     chat_container = st.container()
-    
     with chat_container:
-        for i, msg in enumerate(st.session_state.messages):
-            # We iterate to apply CSS classes cleanly
+        for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-    # Input Area - Stays sticky to bottom automatically
     if prompt := st.chat_input("Ask a question..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
-        
-        # Immediate user feedback
         with st.chat_message("user"): st.markdown(prompt)
         save_memory("user", prompt)
         
@@ -275,12 +236,10 @@ with tab2:
             client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
             
             with st.status("Thinking...", expanded=True) as status:
-                st.write("Accessing Secure Context...")
                 context_str = ""
                 if 'context' in st.session_state:
                     cmp_sum = st.session_state['context']['campaigns'].to_string(index=False)
                     context_str = f"DATA:\nSales: {st.session_state['context']['total_sales']}\n\nCAMPAIGNS:\n{cmp_sum}"
-                st.write("Processing Strategy...")
                 status.update(label="Complete", state="complete", expanded=False)
             
             history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
@@ -288,15 +247,12 @@ with tab2:
             
             stream = client.chat.completions.create(
                 model="gpt-4o",
-                messages=[{"role": "system", "content": final_prompt}] + 
-                         [{"role": m["role"], "content": m["content"]} for m in history],
+                messages=[{"role": "system", "content": final_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history],
                 stream=True
             )
             with st.chat_message("assistant"): response = st.write_stream(stream)
             st.session_state.messages.append({"role": "assistant", "content": response})
             save_memory("assistant", response)
-            
-            # Force refresh to ensure alignment applies to new messages
-            st.rerun()
+            st.rerun() # Forces layout refresh
             
         except Exception as e: st.error(f"Error: {e}")
