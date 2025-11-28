@@ -111,21 +111,14 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
     except Exception as e: return None, f"Shopify Crash: {e}"
 
 def fetch_ad_creatives_batch(token, ad_ids):
-    """
-    Step 2: Fetch Creative Data.
-    UPGRADE: Prioritize 'full_picture' from object_story_spec for HD quality.
-    """
     if not ad_ids: return {}
     image_map = {}
-    
     chunks = [ad_ids[i:i + 50] for i in range(0, len(ad_ids), 50)]
-    
     for chunk in chunks:
         try:
             ids_str = ",".join(chunk)
             url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=creative{{image_url,thumbnail_url,object_story_spec,asset_feed_spec,effective_object_story_id,instagram_permalink_url}}&access_token={token}"
             res = requests.get(url)
-            
             if res.status_code == 200:
                 data = res.json()
                 for ad_id, val in data.items():
@@ -133,35 +126,21 @@ def fetch_ad_creatives_batch(token, ad_ids):
                     img = None
                     link = None
                     
-                    # --- 1. RESOLUTION LOGIC (HD FIRST) ---
-                    
-                    # A. Check Object Story (Standard Ads) - usually has 'full_picture'
+                    # Image Logic
                     try:
                         spec = creative.get('object_story_spec', {})
-                        # Link Data 'full_picture' is the 1080p asset
-                        img = spec.get('link_data', {}).get('full_picture')
-                        
-                        # Fallback to standard picture
-                        if not img: img = spec.get('link_data', {}).get('picture')
-                        
-                        # Photo Data
+                        img = spec.get('link_data', {}).get('full_picture') or spec.get('link_data', {}).get('picture')
                         if not img: img = spec.get('photo_data', {}).get('url')
-                        
-                        # Video Data (image_url is usually high res poster)
                         if not img: img = spec.get('video_data', {}).get('image_url')
                     except: pass
-                    
-                    # B. Check Dynamic Creative (DCO)
                     if not img:
                         try:
                             images = creative.get('asset_feed_spec', {}).get('images', [])
                             if images: img = images[0].get('url')
                         except: pass
-
-                    # C. Fallback to direct fields (often lower res)
                     if not img: img = creative.get('image_url') or creative.get('thumbnail_url')
                     
-                    # --- 2. LINK LOGIC ---
+                    # Link Logic
                     link = creative.get('instagram_permalink_url')
                     if not link:
                         post_id = creative.get('effective_object_story_id')
@@ -169,9 +148,7 @@ def fetch_ad_creatives_batch(token, ad_ids):
                             
                     if img:
                         image_map[ad_id] = {"img": img, "link": link}
-                        
         except Exception: pass
-        
     return image_map
 
 def fetch_meta_data(token, account_id, start_date, end_date):
@@ -179,16 +156,22 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         base_url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
         time_range = json.dumps({'since': start_date.strftime('%Y-%m-%d'), 'until': end_date.strftime('%Y-%m-%d')})
         
+        # 1. Campaign Level
         cmp_params = {'access_token': token, 'time_range': time_range, 'level': 'campaign', 'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc', 'limit': 100}
         cmp_res = requests.get(base_url, params=cmp_params)
         
+        # 2. Daily Spend
         daily_params = {'access_token': token, 'time_range': time_range, 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100}
         daily_res = requests.get(base_url, params=daily_params)
         
+        # 3. Ad Level (UPGRADE: Added adset_name, campaign_name, created_time)
         ad_params = {
-            'access_token': token, 'time_range': time_range, 'level': 'ad',
-            'fields': 'ad_id,ad_name,spend,ctr,cpm,action_values', 
-            'limit': 50, 'sort': ['spend_descending']
+            'access_token': token, 
+            'time_range': time_range, 
+            'level': 'ad',
+            'fields': 'ad_id,ad_name,adset_name,campaign_name,created_time,spend,ctr,cpm,action_values', 
+            'limit': 50, 
+            'sort': ['spend_descending']
         }
         ad_res = requests.get(base_url, params=ad_params)
 
@@ -221,10 +204,20 @@ def fetch_meta_data(token, account_id, start_date, end_date):
                 actions = a.get('action_values', [])
                 sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
                 ad_id = a.get('ad_id') or a.get('id')
+                
+                # Calculate Live Days
+                created = datetime.strptime(a.get('created_time', datetime.now().strftime('%Y-%m-%d')), '%Y-%m-%d')
+                days_live = (datetime.now() - created).days
+                
                 if ad_id:
                     ad_ids_to_fetch.append(ad_id)
                     gallery_ads.append({
-                        "id": ad_id, "name": a['ad_name'], "spend": spend, 
+                        "id": ad_id,
+                        "name": a['ad_name'], 
+                        "campaign": a.get('campaign_name', 'Unknown Campaign'),
+                        "adset": a.get('adset_name', 'Unknown Ad Set'),
+                        "days_live": days_live,
+                        "spend": spend, 
                         "roas": round(sales_val/spend, 2) if spend>0 else 0,
                         "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0))
                     })
@@ -329,19 +322,20 @@ st.markdown(f"""
     /* GALLERY STYLES */
     .ad-card {{ background-color: #111; border: 1px solid #222; border-radius: 12px; overflow: hidden; margin-bottom: 20px; transition: transform 0.2s; position: relative; display: flex; flex-direction: column; }}
     .ad-card:hover {{ border-color: #444; transform: translateY(-2px); z-index: 10; }}
-    /* Standard Card Image - Force Aspect Ratio or Height */
-    .ad-image-container {{ position: relative; width: 100%; height: 200px; background-color: #000; overflow: hidden; }}
+    .ad-image-container {{ position: relative; width: 100%; height: 220px; background-color: #000; overflow: hidden; }}
     .ad-bg {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-size: cover; background-position: center; filter: blur(20px) brightness(0.5); z-index: 1; }}
     .ad-image {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }}
     
-    /* Permanent Footer */
-    .ad-footer {{ background-color: #161616; padding: 10px; border-top: 1px solid #222; flex-grow: 1; }}
-    .ad-title {{ font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
+    .ad-footer {{ background-color: #161616; padding: 12px; border-top: 1px solid #222; flex-grow: 1; }}
+    .ad-title {{ font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; }}
     .ad-badge-top {{ position: absolute; top: 8px; right: 8px; z-index: 4; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; backdrop-filter: blur(4px); }}
-    .ad-link-icon {{ position: absolute; top: 8px; left: 8px; z-index: 4; padding: 4px; border-radius: 50%; background: rgba(0,0,0,0.6); color: white; backdrop-filter: blur(4px); }}
     
-    .row-split {{ display: flex; justify-content: space-between; font-size: 12px; color: #888; margin-top: 4px; }}
+    .row-split {{ display: flex; justify-content: space-between; font-size: 12px; color: #888; margin-top: 4px; align-items: center; }}
     .text-val {{ font-weight: 600; color: #ccc; }}
+    .context-tag {{ font-size: 10px; background: #222; padding: 2px 6px; border-radius: 4px; color: #888; max-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    
+    .btn-view {{ display: block; width: 100%; text-align: center; background: #222; color: #ccc; font-size: 11px; padding: 6px 0; border-radius: 6px; margin-top: 10px; transition: background 0.2s; }}
+    .btn-view:hover {{ background: #333; color: white; }}
     
     a {{ text-decoration: none; color: inherit; }}
 </style>
@@ -398,26 +392,28 @@ with dash_col:
                             link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
                             
                             st.markdown(f"""
-                            <a href="{link}" target="_blank">
-                                <div class="ad-card">
-                                    <div class="ad-image-container">
-                                        <div class="ad-bg" style="background-image: url('{img_src}');"></div>
-                                        <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
-                                        <div class="ad-link-icon">↗</div>
-                                        <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
-                                    </div>
-                                    <div class="ad-footer">
-                                        <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
-                                        <div class="row-split">
-                                            <div><span style="color:#888;">Spend</span> <span class="text-val">${ad['spend']:,.0f}</span></div>
-                                            <div><span style="color:#888;">CPM</span> <span class="text-val">${ad['cpm']:.2f}</span></div>
-                                        </div>
-                                        <div class="row-split">
-                                            <div><span style="color:#888;">CTR</span> <span class="text-val">{ad['ctr']:.2f}%</span></div>
-                                        </div>
-                                    </div>
+                            <div class="ad-card">
+                                <div class="ad-image-container">
+                                    <div class="ad-bg" style="background-image: url('{img_src}');"></div>
+                                    <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
+                                    <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
                                 </div>
-                            </a>
+                                <div class="ad-footer">
+                                    <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
+                                    <div class="row-split" style="margin-bottom:6px;">
+                                        <div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div>
+                                        <div class="context-tag" title="Ad Set: {ad['adset']}">{ad['adset']}</div>
+                                    </div>
+                                    <div class="row-split">
+                                        <div><span style="color:#888;">Spend</span> <span class="text-val">${ad['spend']:,.0f}</span></div>
+                                        <div><span style="color:#888;">CTR</span> <span class="text-val">{ad['ctr']:.2f}%</span></div>
+                                    </div>
+                                    <div class="row-split">
+                                        <div style="font-size:10px; color:#555;">Live for {ad['days_live']} days</div>
+                                    </div>
+                                    <a href="{link}" target="_blank" class="btn-view">View Ad ↗</a>
+                                </div>
+                            </div>
                             """, unsafe_allow_html=True)
                 else: st.info("No active creatives found in this date range.")
 
