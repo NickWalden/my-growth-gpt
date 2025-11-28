@@ -37,44 +37,54 @@ st.markdown("""
         border-bottom: 1px solid #1C1C1E;
     }
 
-    /* 3. iMESSAGE STYLE CHAT (STAGGERED & FIXED WIDTH) */
+    /* 3. iMESSAGE STYLE CHAT (THE FIX) */
     
+    /* REMOVE DEFAULT BACKGROUNDS */
+    .stChatMessage {
+        background-color: transparent !important;
+    }
+
     /* USER MESSAGES (Right Side) */
     /* We use :has() to detect the user avatar, ensuring alignment is always correct */
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"]) {
-        flex-direction: row-reverse;
+        flex-direction: row-reverse; /* Flips Avatar to the Right */
         text-align: right;
     }
+    
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"]) div[data-testid="stChatMessageContent"] {
         background-color: #007AFF !important; /* iOS Blue */
         color: white !important;
         border-radius: 20px 20px 4px 20px !important;
         
         /* THE STAGGERED LOOK FIX */
-        max-width: 70%;         /* Limits width */
-        margin-left: auto;      /* Pushes bubble to the far right */
-        margin-right: 10px;     /* Small gap near avatar */
-        text-align: left;       /* Keeps text readable inside bubble */
+        display: inline-block;  /* Allows box to shrink to text size */
+        max-width: 70%;         /* Prevents it from going full width */
+        margin-right: 10px;     /* Gap near avatar */
+        text-align: left;       /* Text inside bubble stays readable */
+        box-shadow: 0 1px 2px rgba(0,0,0,0.3);
     }
 
     /* ASSISTANT MESSAGES (Left Side) */
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-assistant"]) {
-        flex-direction: row;
+        flex-direction: row; /* Standard alignment */
         text-align: left;
     }
+    
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-assistant"]) div[data-testid="stChatMessageContent"] {
         background-color: #1C1C1E !important; /* iOS Dark Grey */
         border: 1px solid #2C2C2E;
         border-radius: 20px 20px 20px 4px !important;
         
         /* THE STAGGERED LOOK FIX */
-        max-width: 70%;         /* Limits width */
-        margin-right: auto;     /* Pushes bubble to the far left */
-        margin-left: 10px;      /* Small gap near avatar */
+        display: inline-block;
+        max-width: 70%;
+        margin-left: 10px;
+        text-align: left;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
     }
 
     /* AVATAR COLORS */
-    div[data-testid="chatAvatarIcon-user"] { background-color: #1C1C1E !important; }
+    div[data-testid="chatAvatarIcon-user"] { background-color: #2C2C2E !important; }
     div[data-testid="chatAvatarIcon-assistant"] { background-color: #007AFF !important; }
 
     /* 4. METRICS & CARDS */
@@ -253,6 +263,6 @@ with tab2:
             with st.chat_message("assistant"): response = st.write_stream(stream)
             st.session_state.messages.append({"role": "assistant", "content": response})
             save_memory("assistant", response)
-            st.rerun() # Forces layout refresh
+            st.rerun()
             
         except Exception as e: st.error(f"Error: {e}")
