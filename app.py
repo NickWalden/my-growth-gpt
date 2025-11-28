@@ -79,7 +79,6 @@ if 'logs' not in st.session_state: st.session_state.logs = []
 with st.sidebar:
     st.markdown("### ⚙️ Console Settings")
     
-    # SLIDERS
     chat_width_pct = st.slider("Chat Width", 20, 60, 30, 5, format="%d%%")
     font_size = st.slider("Text Size", 12, 24, 15, 1, format="%dpx")
     
@@ -126,24 +125,27 @@ st.markdown(f"""
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         background-color: #000000;
         color: #ffffff;
+        height: 100vh;
+        overflow: hidden !important; 
     }}
     
-    /* HIDE HEADER & LOCK PAGE SCROLL */
     header[data-testid="stHeader"] {{ display: none; }}
+
+    /* --- THE SCROLL FIX --- */
     .block-container {{
         max-width: 100%;
         padding: 1rem 1rem 0 1rem;
-        overflow: hidden; /* Stops whole page from scrolling */
+        height: 100vh;
+        overflow: hidden !important;
     }}
-
+    
     /* --- STICKY INPUT POSITIONING --- */
-    /* Dynamically calculated based on slider */
     [data-testid="stChatInput"] {{
         position: fixed !important;
         bottom: 0 !important;
         right: 1.5rem !important;
         left: auto !important;
-        width: calc({chat_width_pct}% - 2rem) !important; /* Subtract padding */
+        width: {chat_width_pct-2}% !important;
         min-width: 300px;
         background-color: #111111 !important;
         z-index: 9999 !important;
@@ -152,9 +154,8 @@ st.markdown(f"""
         padding-bottom: 25px !important;
     }}
     
-    /* --- TEXT SIZING FIX --- */
-    /* Target all content inside bubbles */
-    .chat-bubble, .chat-bubble p, .chat-bubble span {{
+    /* --- TEXT SIZING FIX (Targeting Everything) --- */
+    .chat-bubble, .user-bubble, .bot-bubble, .chat-bubble p, .user-bubble p, .bot-bubble p {{
         font-size: {font_size}px !important; 
         line-height: 1.5;
     }}
@@ -186,15 +187,13 @@ st.markdown(f"""
 # 🖥️ SPLIT LAYOUT
 # ==========================================
 
-# Use gap="large" for visual separation
 dash_col, chat_col = st.columns([100-chat_width_pct, chat_width_pct], gap="medium")
 
 # ------------------------------------------
 # 📊 LEFT: DASHBOARD
 # ------------------------------------------
 with dash_col:
-    # Use st.container(height=...) to create an INDEPENDENT SCROLL AREA
-    # border=False makes it look seamless
+    # INDEPENDENT SCROLL AREA
     with st.container(height=850, border=False):
         st.markdown("## Overview")
         
@@ -232,7 +231,7 @@ with dash_col:
                     hide_index=True,
                     use_container_width=True
                 )
-                st.markdown("<br><br>", unsafe_allow_html=True)
+                st.markdown("<br><br><br><br>", unsafe_allow_html=True)
         else:
             st.info("👈 Sync Data from the sidebar to begin.")
 
@@ -242,12 +241,9 @@ with dash_col:
 with chat_col:
     st.markdown("### AI Strategist")
     
-    # INDEPENDENT SCROLL AREA FOR CHAT
-    # Note: We create a container to hold the chat history.
-    # The Chat Input stays OUTSIDE this container (fixed to bottom)
+    # INDEPENDENT SCROLL AREA
     with st.container(height=780, border=False):
         
-        # Render Custom HTML Chat
         chat_html = '<div style="padding-bottom: 20px;">' 
         for msg in st.session_state.messages:
             if msg["role"] == "user":
