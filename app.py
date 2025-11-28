@@ -110,45 +110,6 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
         else: return None, f"Shopify Error {res.status_code}"
     except Exception as e: return None, f"Shopify Crash: {e}"
 
-def get_creative_images(token, creative_ids):
-    """Deep search for images in Meta Creative Objects"""
-    if not creative_ids: return {}
-    url_map = {}
-    try:
-        # Request fields including nested data structures
-        ids_str = ",".join(creative_ids[:50])
-        url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=thumbnail_url,image_url,name,object_story_spec,asset_feed_spec&access_token={token}"
-        res = requests.get(url)
-        if res.status_code == 200:
-            data = res.json()
-            for cid, val in data.items():
-                img = None
-                # Priority 1: Direct Thumbnail/Image
-                img = val.get('thumbnail_url') or val.get('image_url')
-                
-                # Priority 2: Object Story Spec (Standard Ads)
-                if not img:
-                    try:
-                        spec = val.get('object_story_spec', {})
-                        # Link Data (Single Image)
-                        img = spec.get('link_data', {}).get('picture')
-                        # Photo Data
-                        if not img: img = spec.get('photo_data', {}).get('image_url')
-                        # Video Data
-                        if not img: img = spec.get('video_data', {}).get('image_url')
-                    except: pass
-                
-                # Priority 3: Asset Feed (DCO / Dynamic Ads)
-                if not img:
-                    try:
-                        images = val.get('asset_feed_spec', {}).get('images', [])
-                        if images: img = images[0].get('url')
-                    except: pass
-
-                url_map[cid] = img
-    except Exception: pass
-    return url_map
-
 def fetch_meta_data(token, account_id, start_date, end_date):
     try:
         base_url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
@@ -162,13 +123,15 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         daily_params = {'access_token': token, 'time_range': time_range, 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100}
         daily_res = requests.get(base_url, params=daily_params)
         
-        # 3. Ad Level (FIX: Use SAME time range as dashboard, remove sort to avoid empty results)
+        # 3. Ad Level with INLINE CREATIVE FETCHING (The Fix)
+        # We query the AD level, but we ask it to expand the 'creative' field to give us the image immediately
         ad_params = {
             'access_token': token, 
-            'time_range': time_range, # Use the full user-selected range!
+            'time_range': time_range, 
             'level': 'ad',
-            'fields': 'ad_name,creative,spend,ctr,cpm,action_values', 
-            'limit': 50 # Increase limit
+            'fields': 'ad_name,creative{thumbnail_url,image_url,title,object_story_spec},spend,ctr,cpm,action_values', 
+            'limit': 30, 
+            'sort': ['spend_descending']
         }
         ad_res = requests.get(base_url, params=ad_params)
 
@@ -189,32 +152,33 @@ def fetch_meta_data(token, account_id, start_date, end_date):
                 sales_val = sum([float(a['value']) for a in actions if a['action_type'] == 'purchase']) if actions else 0
                 campaigns.append({"Campaign": c.get('campaign_name'), "Spend": spend, "Sales": sales_val, "ROAS": round(sales_val/spend, 2) if spend>0 else 0, "CTR": float(c.get('ctr', 0))})
             
-            # Process Gallery
+            # Process Gallery with Inline Images
             gallery_ads = []
-            creative_ids = []
             for a in ad_data:
                 spend = float(a.get('spend', 0))
-                # Soft filter: Only show ads with > $0 spend OR impressions
-                if spend > 0 or int(a.get('impressions', 0)) > 100:
+                if spend > 0 or int(a.get('impressions', 0)) > 50:
                     actions = a.get('action_values', [])
                     sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
-                    cid = a.get('creative', {}).get('id')
-                    if cid: creative_ids.append(cid)
                     
+                    # Extract Image directly from the nested creative object
+                    creative = a.get('creative', {})
+                    img_url = creative.get('thumbnail_url') or creative.get('image_url')
+                    
+                    # Deep Fallback for Dynamic Ads
+                    if not img_url:
+                        try:
+                            # Sometimes it's deep inside the story spec
+                            spec = creative.get('object_story_spec', {})
+                            img_url = spec.get('link_data', {}).get('picture') or spec.get('photo_data', {}).get('image_url')
+                        except: pass
+
                     gallery_ads.append({
                         "name": a['ad_name'], "spend": spend, 
                         "roas": round(sales_val/spend, 2) if spend>0 else 0,
-                        "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0)), "creative_id": cid
+                        "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0)), 
+                        "image_url": img_url
                     })
             
-            # Python Sort (Safer than API sort)
-            gallery_ads.sort(key=lambda x: x['spend'], reverse=True)
-            
-            # Fetch Images
-            image_map = get_creative_images(token, creative_ids)
-            for ad in gallery_ads:
-                ad['image_url'] = image_map.get(ad['creative_id'])
-
             return {
                 "campaign_df": pd.DataFrame(campaigns), "daily_spend_df": df_daily_spend,
                 "total_spend": total_spend, "gallery_ads": gallery_ads
