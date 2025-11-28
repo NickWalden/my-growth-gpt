@@ -34,8 +34,10 @@ def save_memory(role, content):
     except Exception: pass
 
 # --- 3. DATA FETCHING ---
+
 def fetch_shopify_data(domain, token):
     try:
+        # Fetch last 30 days
         last_30 = (datetime.now() - timedelta(days=30)).isoformat()
         url = f"https://{domain}/admin/api/2023-10/orders.json?status=any&created_at_min={last_30}&limit=250"
         headers = {"X-Shopify-Access-Token": token}
@@ -43,29 +45,36 @@ def fetch_shopify_data(domain, token):
         
         if res.status_code == 200:
             orders = res.json().get('orders', [])
-            daily_data = {}
+            
+            # 1. Daily Sales
+            daily_map = {}
+            # 2. Product Breakdown
             product_sales = {}
             total_revenue = 0
             
             for o in orders:
+                # Date Key (YYYY-MM-DD)
                 date = o['created_at'][:10]
                 val = float(o['total_price'])
-                daily_data[date] = daily_data.get(date, 0) + val
+                
+                daily_map[date] = daily_map.get(date, 0) + val
                 total_revenue += val
+                
                 for item in o.get('line_items', []):
                     p_name = item['title']
                     p_rev = float(item['price']) * item['quantity']
                     product_sales[p_name] = product_sales.get(p_name, 0) + p_rev
 
-            df_daily = pd.DataFrame(list(daily_data.items()), columns=['date', 'sales'])
+            # Create DataFrame
+            df_daily = pd.DataFrame(list(daily_map.items()), columns=['date', 'sales'])
             df_daily['date'] = pd.to_datetime(df_daily['date'])
+            
             sorted_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:5]
             
             return {
                 "daily_df": df_daily,
                 "total_sales": total_revenue,
                 "top_products": sorted_products,
-                "order_count": len(orders),
                 "aov": total_revenue / len(orders) if len(orders) > 0 else 0
             }, None
         else: return None, f"Shopify Error {res.status_code}: {res.text}"
@@ -74,23 +83,43 @@ def fetch_shopify_data(domain, token):
 def fetch_meta_data(token, account_id):
     try:
         base_url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
+        
+        # 1. Campaign Level (For Table)
         cmp_params = {'access_token': token, 'date_preset': 'last_30d', 'level': 'campaign', 'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc'}
         cmp_res = requests.get(base_url, params=cmp_params)
+        
+        # 2. Daily Spend (For Profit Chart) - NEW!
+        daily_params = {'access_token': token, 'date_preset': 'last_30d', 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start'}
+        daily_res = requests.get(base_url, params=daily_params)
+        
+        # 3. Ad Level (For AI Context)
         ad_params = {'access_token': token, 'date_preset': 'last_7d', 'level': 'ad', 'fields': 'ad_name,spend,ctr,cpm,action_values', 'limit': 20}
         ad_res = requests.get(base_url, params=ad_params)
 
-        if cmp_res.status_code == 200 and ad_res.status_code == 200:
+        if cmp_res.status_code == 200 and daily_res.status_code == 200:
             cmp_data = cmp_res.json().get('data', [])
+            daily_data = daily_res.json().get('data', [])
             ad_data = ad_res.json().get('data', [])
-            campaigns = []
+            
+            # Process Daily Spend
+            daily_spend_map = {}
             total_spend = 0
+            for d in daily_data:
+                daily_spend_map[d['date_start']] = float(d['spend'])
+                total_spend += float(d['spend'])
+                
+            df_daily_spend = pd.DataFrame(list(daily_spend_map.items()), columns=['date', 'spend'])
+            df_daily_spend['date'] = pd.to_datetime(df_daily_spend['date'])
+
+            # Process Campaigns
+            campaigns = []
             for c in cmp_data:
                 spend = float(c.get('spend', 0))
-                total_spend += spend
                 actions = c.get('action_values', [])
                 sales_val = sum([float(a['value']) for a in actions if a['action_type'] == 'purchase']) if actions else 0
-                campaigns.append({"Campaign": c.get('campaign_name'), "Spend": spend, "Sales": sales_val, "ROAS": round(sales_val/spend, 2) if spend>0 else 0, "CTR": float(c.get('ctr', 0)), "CPM": float(c.get('cpm', 0))})
+                campaigns.append({"Campaign": c.get('campaign_name'), "Spend": spend, "Sales": sales_val, "ROAS": round(sales_val/spend, 2) if spend>0 else 0, "CTR": float(c.get('ctr', 0))})
             
+            # Process Top Ads
             top_ads = []
             for a in ad_data:
                 spend = float(a.get('spend', 0))
@@ -100,19 +129,33 @@ def fetch_meta_data(token, account_id):
                     roas = round(sales_val/spend, 2)
                     top_ads.append(f"{a['ad_name']} | Spend:${spend:.0f} | ROAS:{roas}x | CTR:{a.get('ctr')}%")
 
-            return {"campaign_df": pd.DataFrame(campaigns), "total_spend": total_spend, "top_ads_list": top_ads}, None
+            return {
+                "campaign_df": pd.DataFrame(campaigns),
+                "daily_spend_df": df_daily_spend,
+                "total_spend": total_spend,
+                "top_ads_list": top_ads
+            }, None
         else: return None, f"Meta Error: {cmp_res.text}"
     except Exception as e: return None, f"Meta Crash: {e}"
 
-# --- 4. APP STATE ---
+# --- 4. APP STATE & CONTROLS ---
+
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
 if 'logs' not in st.session_state: st.session_state.logs = []
 
-# --- 5. SIDEBAR SETTINGS ---
 with st.sidebar:
     st.markdown("### ⚙️ Settings")
+    
+    # 1. NEW: PROFIT SETTINGS
+    st.caption("Profitability Engine")
+    margin_pct = st.slider("Est. Gross Margin %", 10, 90, 60, 5, format="%d%%") / 100.0
+    
+    st.divider()
+    
+    # 2. UI SETTINGS
     chat_width_pct = st.slider("Chat Width", 20, 60, 35, 5, format="%d%%")
     font_size = st.slider("Text Size", 12, 24, 14, 1, format="%dpx")
+    
     st.divider()
     
     if st.button("🔄 Sync Data", type="primary", use_container_width=True):
@@ -121,14 +164,47 @@ with st.sidebar:
             try:
                 s_domain, s_token = st.secrets["SHOPIFY_DOMAIN"], st.secrets["SHOPIFY_TOKEN"]
                 m_token, m_id = st.secrets["META_TOKEN"], st.secrets["META_ACCOUNT_ID"]
+                
                 shop_data, s_err = fetch_shopify_data(s_domain, s_token)
                 meta_data, m_err = fetch_meta_data(m_token, m_id)
+                
                 if s_err: st.session_state.logs.append(s_err)
                 if m_err: st.session_state.logs.append(m_err)
+
                 if shop_data and meta_data:
-                    ts = shop_data['total_sales']
-                    tsp = meta_data['total_spend']
-                    st.session_state['context'] = {"shopify": shop_data, "meta": meta_data, "roas": ts / tsp if tsp > 0 else 0}
+                    # --- THE "TRUE PROFIT" CALCULATOR ---
+                    # 1. Merge Daily Dataframes
+                    df_s = shop_data['daily_df']
+                    df_m = meta_data['daily_spend_df']
+                    
+                    # Outer join to ensure we keep days with sales but no spend (or vice versa)
+                    df_merged = pd.merge(df_s, df_m, on='date', how='outer').fillna(0)
+                    
+                    # 2. Calculate Profit Metrics
+                    # Gross Profit = Revenue * Margin %
+                    df_merged['gross_profit'] = df_merged['sales'] * margin_pct
+                    
+                    # Net Profit (Contribution) = Gross Profit - Ad Spend
+                    df_merged['net_profit'] = df_merged['gross_profit'] - df_merged['spend']
+                    
+                    # Sort by date
+                    df_merged = df_merged.sort_values('date')
+                    
+                    # 3. Aggregate Totals
+                    total_net_profit = df_merged['net_profit'].sum()
+                    
+                    # Calculate ROI (Return on Investment)
+                    # ROI = Net Profit / Ad Spend (Shows efficiency)
+                    roi = (total_net_profit / meta_data['total_spend']) * 100 if meta_data['total_spend'] > 0 else 0
+
+                    st.session_state['context'] = {
+                        "shopify": shop_data,
+                        "meta": meta_data,
+                        "profit_df": df_merged,
+                        "total_net_profit": total_net_profit,
+                        "roi": roi,
+                        "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
+                    }
                     if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
                 else: st.toast("Sync Failed", icon="⚠️")
             except Exception as e: st.session_state.logs.append(f"Config Error: {e}")
@@ -136,13 +212,13 @@ with st.sidebar:
     if st.session_state.logs:
         with st.expander(f"⚠️ Logs ({len(st.session_state.logs)})"):
             for err in st.session_state.logs: st.error(err)
-    
+            
     st.divider()
     if st.button("Clear Memory", type="secondary", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
-# --- 6. CSS STYLING (FIXED HEADER) ---
+# --- 5. CSS ARCHITECTURE ---
 st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
@@ -153,38 +229,20 @@ st.markdown(f"""
         height: 100vh;
         overflow: hidden !important; 
     }}
-    
-    /* --- FIX: RESTORE HEADER BUT MAKE TRANSPARENT --- */
-    header[data-testid="stHeader"] {{
-        background-color: transparent !important;
-        z-index: 100; /* Ensure button is clickable */
-    }}
-    /* Hide the red decoration line */
-    header[data-testid="stHeader"] .decoration {{ display: none; }}
-
-    .block-container {{ max-width: 100%; padding: 3rem 1rem 0 1rem; height: 100vh; overflow: hidden !important; }}
-    
-    /* Columns & Scrolling */
-    div[data-testid="column"] {{ height: 90vh; overflow-y: auto; overflow-x: hidden; display: block; }}
+    header[data-testid="stHeader"] {{ display: none; }}
+    .block-container {{ max-width: 100%; padding: 1rem 1rem 0 1rem; height: 100vh; overflow: hidden !important; }}
+    div[data-testid="column"] {{ height: 94vh; overflow-y: auto; overflow-x: hidden; display: block; }}
     div[data-testid="column"]:nth-of-type(2) > div {{ padding-bottom: 150px !important; }}
-
-    /* Input Position */
     [data-testid="stChatInput"] {{
         position: fixed !important; bottom: 0 !important; right: 1.5rem !important; left: auto !important;
         width: {chat_width_pct-2}% !important; min-width: 300px;
         background-color: #111111 !important; z-index: 9999 !important;
         border-top: 1px solid #333; padding-top: 15px !important; padding-bottom: 25px !important;
     }}
-    
-    /* Text Sizing */
     .chat-bubble, .chat-bubble * {{ font-size: {font_size}px !important; line-height: 1.5; }}
-    
-    /* Bubbles */
     .chat-bubble {{ padding: 12px 16px; border-radius: 18px; max-width: 85%; position: relative; word-wrap: break-word; margin-bottom: 4px; display: inline-block; }}
     .user-bubble {{ background-color: #0A84FF; color: white; border-bottom-right-radius: 2px; }}
     .bot-bubble {{ background-color: #262626; color: #E5E5EA; border: 1px solid #333; border-bottom-left-radius: 2px; }}
-    
-    /* Utilities */
     .chat-row {{ display: flex; margin-bottom: 12px; width: 100%; }}
     .user-row {{ justify-content: flex-end; }}
     .bot-row {{ justify-content: flex-start; }}
@@ -206,31 +264,65 @@ with dash_col:
             s_data = ctx['shopify']
             m_data = ctx['meta']
             
+            # --- 1. PRO METRICS ROW ---
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Revenue (30d)", f"${s_data['total_sales']:,.0f}")
-            c2.metric("Spend (30d)", f"${m_data['total_spend']:,.0f}")
+            c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
+            c2.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Contribution")
             c3.metric("ROAS", f"{ctx['roas']:.2f}x")
-            c4.metric("AOV", f"${s_data['aov']:.2f}")
+            
+            # ROI Color Logic
+            roi_color = "normal" if ctx['roi'] > 0 else "inverse"
+            c4.metric("ROI", f"{ctx['roi']:.0f}%", delta="Efficiency", delta_color=roi_color)
 
             st.markdown("---")
             
-            c_chart, c_prod = st.columns([2, 1])
-            with c_chart:
-                st.subheader("Sales Trend")
-                fig = go.Figure()
-                fig.add_trace(go.Bar(x=s_data['daily_df']['date'], y=s_data['daily_df']['sales'], marker_color='#0A84FF'))
-                fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig, use_container_width=True)
+            # --- 2. PROFITABILITY CHART (The "Pro" Feature) ---
+            st.subheader("Daily Profit vs. Spend")
             
-            with c_prod:
-                st.subheader("Top Products")
-                for name, rev in s_data['top_products']:
-                    st.markdown(f"**{name}**")
-                    st.caption(f"${rev:,.0f} revenue")
-                    st.progress(min(rev / (s_data['total_sales'] or 1), 1.0))
+            df = ctx['profit_df']
+            if not df.empty:
+                fig = go.Figure()
+                
+                # Bar: Net Profit (Green if positive, Red if negative)
+                fig.add_trace(go.Bar(
+                    x=df['date'], 
+                    y=df['net_profit'],
+                    name='Net Profit',
+                    marker_color=df['net_profit'].apply(lambda x: '#00C853' if x >= 0 else '#FF3D00')
+                ))
+                
+                # Line: Ad Spend (Overlay)
+                fig.add_trace(go.Scatter(
+                    x=df['date'],
+                    y=df['spend'],
+                    name='Ad Spend',
+                    line=dict(color='#888888', width=2, dash='dot')
+                ))
 
+                fig.update_layout(
+                    template="plotly_dark", 
+                    height=350, 
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    paper_bgcolor='rgba(0,0,0,0)', 
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    hovermode="x unified",
+                    legend=dict(orientation="h", y=1.1)
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            # --- 3. CAMPAIGN TABLE ---
             st.subheader("Campaign Performance")
-            st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
+            st.dataframe(
+                m_data['campaign_df'].sort_values("Spend", ascending=False),
+                column_config={
+                    "Spend": st.column_config.NumberColumn(format="$%.0f"),
+                    "Sales": st.column_config.NumberColumn(format="$%.0f"),
+                    "ROAS": st.column_config.NumberColumn(format="%.2fx"),
+                    "CTR": st.column_config.NumberColumn(format="%.2f%%")
+                },
+                hide_index=True,
+                use_container_width=True
+            )
             st.markdown("<br><br><br>", unsafe_allow_html=True)
         else:
             st.info("👈 Sync Data from the sidebar to begin.")
@@ -256,9 +348,12 @@ if prompt := st.chat_input("Ask about your data..."):
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
-            top_prods = "\n".join([f"- {n}: ${r:.0f}" for n, r in s_data['top_products']])
+            
+            # CALCULATE PROFIT CONTEXT FOR AI
+            profit_str = f"Total Net Profit (Contribution): ${ctx['total_net_profit']:,.2f}\nMargin Used: {margin_pct*100}%\nROI: {ctx['roi']:.2f}%"
+            
             top_ads = "\n".join(m_data['top_ads_list'])
-            context_str = f"OVERVIEW:\nTotal Sales: ${s_data['total_sales']}\nTotal Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\nAOV: ${s_data['aov']:.2f}\n\nTOP PRODUCTS:\n{top_prods}\n\nRECENT ADS:\n{top_ads}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
+            context_str = f"OVERVIEW:\n{profit_str}\nTotal Sales: ${s_data['total_sales']}\nTotal Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\nAOV: ${s_data['aov']:.2f}\n\nRECENT ADS:\n{top_ads}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
         
         history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
         final_prompt = f"You are a Senior Media Buyer. Use this data to answer:\n{context_str}"
