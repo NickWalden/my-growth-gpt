@@ -12,7 +12,7 @@ st.set_page_config(
     page_title="Growth OS",
     page_icon="",
     layout="wide",
-    initial_sidebar_state="collapsed" # Default to collapsed for cleaner view
+    initial_sidebar_state="collapsed"
 )
 
 # --- 2. MEMORY FUNCTIONS ---
@@ -137,12 +137,10 @@ def fetch_ad_creatives_batch(token, ad_ids):
                             if images: img = images[0].get('url')
                         except: pass
                     if not img: img = creative.get('image_url') or creative.get('thumbnail_url')
-                    
                     link = creative.get('instagram_permalink_url')
                     if not link:
                         post_id = creative.get('effective_object_story_id')
                         if post_id: link = f"https://www.facebook.com/{post_id}"
-                            
                     if img: image_map[ad_id] = {"img": img, "link": link}
         except Exception: pass
     return image_map
@@ -187,7 +185,6 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         
         gallery_ads = []
         ad_ids_to_fetch = []
-        
         for a in ad_data:
             spend = float(a.get('spend', 0))
             if spend > 0 or int(a.get('impressions', 0)) > 10:
@@ -228,100 +225,72 @@ if 'messages' not in st.session_state: st.session_state.messages = load_memory()
 if 'logs' not in st.session_state: st.session_state.logs = []
 if 'last_synced_dates' not in st.session_state: st.session_state.last_synced_dates = None
 
-# --- 5. TOP LEVEL LAYOUT (Header & Dates) ---
-
-# We use columns to put Title Left, Date Picker Right
-header_col1, header_col2 = st.columns([1, 2])
+# --- 5. TOP HEADER (Date Picker) ---
+# Column Ratio: [5, 2] to keep Date Picker tight on the right
+header_col1, header_col2 = st.columns([5, 2], gap="medium")
 
 with header_col1:
     st.markdown("# Growth OS")
 
 with header_col2:
-    # Date Picker Row
-    col_preset, col_custom = st.columns([1, 2])
-    
-    with col_preset:
-        preset = st.selectbox(
-            "Quick Select", 
-            ["Last 7 Days", "Last 30 Days", "This Month", "Last Month", "Custom"],
-            index=1,
-            label_visibility="collapsed"
-        )
+    # We combine Preset and Date Range into a clean layout
+    preset = st.selectbox(
+        "Range Preset", 
+        ["Last 7 Days", "Last 30 Days", "This Month", "Last Month", "Custom"],
+        index=1,
+        label_visibility="collapsed"
+    )
     
     today = datetime.now().date()
-    
-    # Logic for Presets
     if preset == "Last 7 Days": s_d, e_d = today - timedelta(days=7), today
     elif preset == "Last 30 Days": s_d, e_d = today - timedelta(days=30), today
     elif preset == "This Month": s_d, e_d = today.replace(day=1), today
     elif preset == "Last Month": 
         first = today.replace(day=1); e_d = first - timedelta(days=1); s_d = e_d.replace(day=1)
     else: 
-        # Default for custom
         s_d, e_d = today - timedelta(days=30), today
 
-    with col_custom:
-        # If custom, allow editing. If preset, show disabled date (or just show range)
-        # We'll just always show the date picker for transparency
-        date_range = st.date_input("Range", value=(s_d, e_d), label_visibility="collapsed")
-        if len(date_range) == 2:
-            s_d, e_d = date_range
+    # Always show date picker for clarity, disable if preset selected? No, let user override.
+    date_range = st.date_input("Custom Range", value=(s_d, e_d), label_visibility="collapsed")
+    if len(date_range) == 2: s_d, e_d = date_range
 
-# --- 6. SIDEBAR (Configuration Only) ---
+# --- 6. SIDEBAR (Config Only) ---
 with st.sidebar:
     st.markdown("### ⚙️ Configuration")
-    
-    # UI Controls
     chat_width_pct = st.slider("Chat Width", 20, 60, 35, 5, format="%d%%")
-    font_size = st.slider("Chat Text Size", 12, 24, 14, 1, format="%dpx")
+    font_size = st.slider("Text Size", 12, 24, 14, 1, format="%dpx")
     margin_pct = st.slider("Margin % (Fallback)", 10, 90, 60, 5, format="%d%%") / 100.0
-    
     st.divider()
-    
-    # Manual Sync (Still useful to force refresh)
-    if st.button("🔄 Force Sync", type="primary", use_container_width=True):
-        # We trigger the sync logic by clearing the 'last_synced' state, forcing a re-run below
-        st.session_state.last_synced_dates = None 
-        st.rerun()
-
+    if st.button("🔄 Force Sync", type="secondary", use_container_width=True):
+        st.session_state.last_synced_dates = None; st.rerun()
     if st.session_state.logs:
         with st.expander(f"⚠️ Logs ({len(st.session_state.logs)})"):
             for err in st.session_state.logs: st.error(err)
-            
     st.divider()
     if st.button("Clear Memory", type="secondary", use_container_width=True): st.session_state.messages = []; st.rerun()
 
-# --- 7. SYNC LOGIC (TRIGGERED BY DATE CHANGE) ---
+# --- 7. AUTO SYNC LOGIC ---
 def run_sync_logic():
     with st.spinner("Syncing Data..."):
         st.session_state.logs = [] 
         try:
             s_domain, s_token = st.secrets["SHOPIFY_DOMAIN"], st.secrets["SHOPIFY_TOKEN"]
             m_token, m_id = st.secrets["META_TOKEN"], st.secrets["META_ACCOUNT_ID"]
-            
             shop_data, s_err = fetch_shopify_data(s_domain, s_token, margin_pct, s_d, e_d)
             meta_data, m_err = fetch_meta_data(m_token, m_id, s_d, e_d)
-            
             if s_err: st.session_state.logs.append(s_err)
             if m_err: st.session_state.logs.append(m_err)
-
             if shop_data and meta_data:
                 df_s, df_m = shop_data['daily_df'], meta_data['daily_spend_df']
                 if not df_s.empty and not df_m.empty:
                     df_merged = pd.merge(df_s, df_m, on='date', how='outer').fillna(0)
                     df_merged['gross_profit'] = df_merged['sales'] - df_merged['cogs']
                     df_merged['net_profit'] = df_merged['gross_profit'] - df_merged['spend']
-                    
-                    # MER Calculation
                     df_merged['mer'] = df_merged.apply(lambda row: row['sales'] / row['spend'] if row['spend'] > 0 else 0, axis=1)
-                    
                     df_merged = df_merged.sort_values('date')
                     total_net_profit = df_merged['net_profit'].sum()
                 else: df_merged = pd.DataFrame(); total_net_profit = 0
-                
-                # Blended MER (Total)
                 blended_mer = shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
-
                 st.session_state['context'] = {
                     "shopify": shop_data, "meta": meta_data, "profit_df": df_merged,
                     "total_net_profit": total_net_profit, "date_range": f"{s_d} to {e_d}",
@@ -333,9 +302,7 @@ def run_sync_logic():
             else: st.toast("Sync Failed", icon="⚠️")
         except Exception as e: st.session_state.logs.append(f"Config Error: {e}")
 
-# Check if we need to sync (Auto-Sync on Load/Change)
-if st.session_state.last_synced_dates != (s_d, e_d):
-    run_sync_logic()
+if st.session_state.last_synced_dates != (s_d, e_d): run_sync_logic()
 
 # --- 8. CSS ---
 st.markdown(f"""
@@ -343,11 +310,13 @@ st.markdown(f"""
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; background-color: #000; color: #fff; height: 100vh; overflow: hidden !important; }}
     
-    header[data-testid="stHeader"] {{ background-color: transparent !important; z-index: 999; }}
+    /* CLICK-THROUGH HEADER FIX */
+    header[data-testid="stHeader"] {{ background-color: transparent !important; z-index: 999; pointer-events: none; }}
+    /* Re-enable clicks on the hamburger button specifically */
+    header[data-testid="stHeader"] button {{ pointer-events: auto; }}
     .stApp > header {{ background-color: transparent; }}
     
     .block-container {{ max-width: 100%; padding: 2rem 1rem 0 1rem; height: 100vh; overflow: hidden !important; }}
-    
     div[data-testid="column"] {{ height: 88vh; overflow-y: auto; overflow-x: hidden; display: block; }}
     div[data-testid="column"]:nth-of-type(2) > div {{ padding-bottom: 150px !important; }}
     
@@ -403,11 +372,9 @@ with dash_col:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
             
-            # --- TOP METRICS ROW (UPDATED WITH MER) ---
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
             c2.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
-            # Prominent Blended MER
             c3.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
             c4.metric("FB ROAS", f"{ctx['roas']:.2f}x")
             
