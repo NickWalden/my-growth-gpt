@@ -5,12 +5,17 @@ import requests
 import plotly.graph_objects as go
 import json
 import time
+import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
-# --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Growth OS", page_icon="", layout="wide", initial_sidebar_state="collapsed")
-AI_MODEL = "gpt-4o" # Change to "gpt-5.1" if/when you have access
+# --- 1. PAGE CONFIGURATION ---
+st.set_page_config(
+    page_title="Growth OS",
+    page_icon="",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
 # --- 2. MEMORY FUNCTIONS ---
 def load_memory():
@@ -97,7 +102,6 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
             is_new = True
             if 'customer' in o and o['customer']:
                 if int(o['customer'].get('orders_count', 1)) > 1: is_new = False
-                # Double check time delta for safety
                 try:
                     ord_time = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00'))
                     cust_time = datetime.fromisoformat(o['customer']['created_at'].replace('Z', '+00:00'))
@@ -149,7 +153,6 @@ def fetch_ad_creatives_batch(token, ad_ids):
                 for ad_id, val in data.items():
                     creative = val.get('creative', {})
                     img, link = None, None
-                    # Image Logic
                     try:
                         spec = creative.get('object_story_spec', {})
                         img = spec.get('link_data', {}).get('full_picture') or spec.get('link_data', {}).get('picture')
@@ -160,7 +163,6 @@ def fetch_ad_creatives_batch(token, ad_ids):
                         try: img = creative.get('asset_feed_spec', {}).get('images', [])[0].get('url')
                         except: pass
                     if not img: img = creative.get('image_url') or creative.get('thumbnail_url')
-                    # Link Logic
                     link = creative.get('instagram_permalink_url')
                     if not link:
                         pid = creative.get('effective_object_story_id')
@@ -224,51 +226,20 @@ def fetch_meta_data(token, account_id, start_date, end_date):
         return {"campaign_df": pd.DataFrame(campaigns), "daily_spend_df": df_daily_spend, "total_spend": total_spend, "gallery_ads": gallery_ads}, None
     except Exception as e: return None, f"Meta Crash: {e}"
 
-# --- 4. AI ANALYST (ANOMALY DETECTION) ---
+# --- 4. AI ANALYST ---
 def generate_briefing(ctx, s_data, m_data):
     try:
         client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-        
-        # Prepare STRICT JSON Data for the AI
         analysis_payload = {
             "period": ctx.get('date_range'),
-            "metrics": {
-                "net_profit": ctx['total_net_profit'],
-                "revenue": s_data['total_sales'],
-                "ad_spend": m_data['total_spend'],
-                "blended_roas": ctx['blended_mer'],
-                "new_customers": s_data['new_orders'],
-                "ncpa": ctx['ncpa']
-            },
+            "metrics": {"net_profit": ctx['total_net_profit'], "revenue": s_data['total_sales'], "ad_spend": m_data['total_spend'], "blended_roas": ctx['blended_mer'], "new_customers": s_data['new_orders'], "ncpa": ctx['ncpa']},
             "top_products": [p[0] for p in s_data['top_products']],
             "campaigns": m_data['campaign_df'].to_dict('records')
         }
-
-        # STRICT JSON PROMPT
-        system_prompt = """
-        You are an elite eCommerce Analyst. 
-        Analyze the data and return a JSON object with exactly these keys:
-        {
-            "headline": "A short, punchy 1-sentence summary of performance.",
-            "wins": ["Bullet point 1 of something going well", "Bullet point 2"],
-            "warnings": ["Bullet point 1 of a problem/risk", "Bullet point 2"],
-            "action_plan": "One clear strategic recommendation."
-        }
-        Do not include markdown formatting like ```json`. Return RAW JSON only.
-        """
-
-        response = client.chat.completions.create(
-            model=AI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(analysis_payload)}
-            ],
-            response_format={"type": "json_object"}
-        )
-        
+        system_prompt = """You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys: {"headline": "A short, punchy 1-sentence summary.", "wins": ["Bullet 1", "Bullet 2"], "warnings": ["Bullet 1", "Bullet 2"], "action_plan": "One clear strategic recommendation."} Do not include markdown formatting. Return RAW JSON only."""
+        response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload)}], response_format={"type": "json_object"})
         return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        return {"headline": "Analysis Unavailable", "wins": [], "warnings": [str(e)], "action_plan": "Check API keys."}
+    except Exception: return {"headline": "Analysis Unavailable", "wins": [], "warnings": [], "action_plan": "Check API keys."}
 
 # --- 5. APP STATE ---
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
@@ -334,10 +305,7 @@ def run_sync_logic():
                     "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
                 }
                 st.session_state['context'] = ctx
-                
-                # TRIGGER AI ANALYSIS
                 st.session_state.briefing = generate_briefing(ctx, shop_data, meta_data)
-                
                 st.session_state.last_synced_dates = (s_d, e_d)
                 if not st.session_state.logs: st.toast("Sync Complete", icon="✅")
             else: st.toast("Sync Failed", icon="⚠️")
@@ -348,7 +316,7 @@ if st.session_state.last_synced_dates != (s_d, e_d): run_sync_logic()
 # --- 7. CSS ---
 st.markdown(f"""
 <style>
-    @import url('[https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap](https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap)');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; background-color: #000; color: #fff; height: 100vh; overflow: hidden !important; }}
     header[data-testid="stHeader"] {{ background-color: transparent !important; z-index: 999; pointer-events: none; }}
     header[data-testid="stHeader"] button {{ pointer-events: auto; }}
@@ -388,8 +356,6 @@ st.markdown(f"""
     .list-metrics {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; text-align: right; min-width: 250px; font-size: 11px; color: #888; }}
     .list-val {{ font-size: 13px; font-weight: 600; color: #eee; }}
     .list-badge {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; margin-left: 10px; }}
-    
-    /* BRIEFING CARD */
     .briefing-card {{ background: #1E1E1E; border: 1px solid #0A84FF; border-radius: 12px; padding: 15px; margin-bottom: 20px; }}
     .briefing-head {{ color: #0A84FF; font-weight: 700; font-size: 14px; margin-bottom: 8px; display: flex; align-items: center; }}
     .briefing-item {{ font-size: 13px; margin-bottom: 4px; display: flex; align-items: flex-start; }}
@@ -408,7 +374,6 @@ with dash_col:
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
-            
             c1, c2, c3, c4, c5, c6 = st.columns(6)
             c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
             c2.metric("Orders", f"{s_data['order_count']:,}")
@@ -448,45 +413,44 @@ with dash_col:
                         cols = st.columns(3)
                         for i, ad in enumerate(ads):
                             with cols[i % 3]:
-                                img_src = ad.get('image_url') or "[https://via.placeholder.com/300x300/222/888?text=No+Image](https://via.placeholder.com/300x300/222/888?text=No+Image)"
+                                img_src = ad.get('image_url') or "https://via.placeholder.com/300x300/222/888?text=No+Image"
                                 roas_val = ad['roas']
                                 badge_color = "rgba(0, 200, 83, 0.9); color: #fff;" if roas_val >= 3.0 else "rgba(255, 214, 0, 0.9); color: #000;" if roas_val >= 1.5 else "rgba(255, 61, 0, 0.9); color: #fff;"
-                                link = ad.get('link') or f"[https://www.facebook.com/ads/library/?id=](https://www.facebook.com/ads/library/?id=){ad['id']}"
-                                st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="ad-card"><div class="ad-image-container"><div class="ad-bg" style="background-image: url('{img_src}');"></div><img src="{img_src}" class="ad-image" onerror="this.src='[https://via.placeholder.com/300x300/222/888?text=Video+Ad](https://via.placeholder.com/300x300/222/888?text=Video+Ad)'"><div class="ad-link-icon">↗</div><div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div></div><div class="ad-footer"><div class="ad-title" title="{ad['name']}">{ad['name']}</div><div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div><div class="grid-stats"><div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div><div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div><div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div><div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div><div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div><div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div></div><div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div></div></div></a>""", unsafe_allow_html=True)
+                                link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
+                                st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="ad-card"><div class="ad-image-container"><div class="ad-bg" style="background-image: url('{img_src}');"></div><img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'"><div class="ad-link-icon">↗</div><div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div></div><div class="ad-footer"><div class="ad-title" title="{ad['name']}">{ad['name']}</div><div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div><div class="grid-stats"><div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div><div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div><div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div><div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div><div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div><div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div></div><div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div></div></div></a>""", unsafe_allow_html=True)
                     else:
                         for ad in ads:
-                            img_src = ad.get('image_url') or "[https://via.placeholder.com/100x100/222/888?text=Img](https://via.placeholder.com/100x100/222/888?text=Img)"
+                            img_src = ad.get('image_url') or "https://via.placeholder.com/100x100/222/888?text=Img"
                             roas_val = ad['roas']
                             badge_color = "#00E676" if roas_val >= 3.0 else "#FFD600" if roas_val >= 1.5 else "#FF3D00"
-                            link = ad.get('link') or f"[https://www.facebook.com/ads/library/?id=](https://www.facebook.com/ads/library/?id=){ad['id']}"
-                            st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="list-row"><img src="{img_src}" class="list-img" onerror="this.src='[https://via.placeholder.com/100x100/222/888?text=Ad](https://via.placeholder.com/100x100/222/888?text=Ad)'"><div class="list-content"><div class="list-info"><div style="font-weight:600; color:#fff; font-size:13px; margin-bottom:4px;">{ad['name']}</div><div style="font-size:11px; color:#666;">{ad['campaign']} • Live {ad['days_live']}d</div></div><div class="list-metrics"><div>Spend <div class="list-val">${ad['spend']:,.0f}</div></div><div>Sales <div class="list-val">{ad['purchases']}</div></div><div>CPA <div class="list-val">${ad['cpa']:.2f}</div></div><div>ROAS <div class="list-val" style="color:{badge_color}">{roas_val}x</div></div></div></div></div></a>""", unsafe_allow_html=True)
+                            link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
+                            st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="list-row"><img src="{img_src}" class="list-img" onerror="this.src='https://via.placeholder.com/100x100/222/888?text=Ad'"><div class="list-content"><div class="list-info"><div style="font-weight:600; color:#fff; font-size:13px; margin-bottom:4px;">{ad['name']}</div><div style="font-size:11px; color:#666;">{ad['campaign']} • Live {ad['days_live']}d</div></div><div class="list-metrics"><div>Spend <div class="list-val">${ad['spend']:,.0f}</div></div><div>Sales <div class="list-val">{ad['purchases']}</div></div><div>CPA <div class="list-val">${ad['cpa']:.2f}</div></div><div>ROAS <div class="list-val" style="color:{badge_color}">{roas_val}x</div></div></div></div></div></a>""", unsafe_allow_html=True)
                 else: st.info("No active creatives found in this date range.")
             with tab4:
                 st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
             st.markdown("<br><br><br>", unsafe_allow_html=True)
         else: st.info("👈 Select Date Range to begin.")
 
-# --- RIGHT: CHAT ---
 with chat_col:
     with st.container(height=780, border=False):
-        # SHOW MORNING BRIEFING IF AVAILABLE
         if 'briefing' in st.session_state and st.session_state.briefing:
             b = st.session_state.briefing
+            # FIX: FLATTEN HTML STRINGS to prevent markdown code blocks
+            wins_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in b.get('wins', [])])
+            warn_html = "".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in b.get('warnings', [])])
+            
             st.markdown(f"""
             <div class="briefing-card">
                 <div class="briefing-head">⚡ DAILY INTELLIGENCE</div>
                 <div style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;">{b.get('headline')}</div>
-                
                 <div style="margin-bottom: 10px;">
                     <div style="color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WINS</div>
-                    {"".join([f'<div class="briefing-item"><span class="briefing-icon">✅</span>{x}</div>' for x in b.get('wins', [])])}
+                    {wins_html}
                 </div>
-                
                 <div style="margin-bottom: 10px;">
                     <div style="color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;">WARNINGS</div>
-                    {"".join([f'<div class="briefing-item"><span class="briefing-icon">⚠️</span>{x}</div>' for x in b.get('warnings', [])])}
+                    {warn_html}
                 </div>
-                
                 <div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;">
                     <div style="color: #0A84FF; font-size: 12px; font-weight: 600;">RECOMMENDATION</div>
                     <div style="font-size: 13px; color: #ccc;">{b.get('action_plan')}</div>
@@ -515,7 +479,7 @@ if prompt := st.chat_input("Ask about your data..."):
         
         history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
         final_prompt = f"You are a Senior Media Buyer. Use this data:\n{context_str}"
-        stream = client.chat.completions.create(model=AI_MODEL, messages=[{"role": "system", "content": final_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history], stream=True)
+        stream = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": final_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history], stream=True)
         
         response_text = ""
         for chunk in stream:
@@ -524,3 +488,17 @@ if prompt := st.chat_input("Ask about your data..."):
         save_memory("assistant", response_text)
         st.rerun()
     except Exception as e: st.error(f"Error: {e}")
+
+# --- SCROLL SCRIPT ---
+js = f"""
+<script>
+    function scrollBottom() {{
+        const chatContainer = window.parent.document.querySelector('div[data-testid="column"]:nth-of-type(2) > div');
+        if (chatContainer) {{
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }}
+    }}
+    setTimeout(scrollBottom, 300);
+</script>
+"""
+components.html(js, height=0)
