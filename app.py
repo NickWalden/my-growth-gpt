@@ -497,4 +497,78 @@ with dash_col:
                                             <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
                                             <div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div>
                                             <div class="grid-stats">
-                                                <div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div>
+                                                <div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div>
+                                                <div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div>
+                                                <div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div>
+                                                <div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div>
+                                                <div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div>
+                                                <div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div>
+                                            </div>
+                                            <div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div>
+                                        </div>
+                                    </div>
+                                </a>""", unsafe_allow_html=True)
+                    else:
+                        for ad in ads:
+                            img_src = ad.get('image_url') or "https://via.placeholder.com/100x100/222/888?text=Img"
+                            roas_val = ad['roas']
+                            badge_color = "#00E676" if roas_val >= 3.0 else "#FFD600" if roas_val >= 1.5 else "#FF3D00"
+                            link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
+                            st.markdown(f"""
+                            <a href="{link}" target="_blank" class="ad-link">
+                                <div class="list-row">
+                                    <img src="{img_src}" class="list-img" onerror="this.src='https://via.placeholder.com/100x100/222/888?text=Ad'">
+                                    <div class="list-content">
+                                        <div class="list-info">
+                                            <div style="font-weight:600; color:#fff; font-size:13px; margin-bottom:4px;">{ad['name']}</div>
+                                            <div style="font-size:11px; color:#666;">{ad['campaign']} • Live {ad['days_live']}d</div>
+                                        </div>
+                                        <div class="list-metrics">
+                                            <div>Spend <div class="list-val">${ad['spend']:,.0f}</div></div>
+                                            <div>Sales <div class="list-val">{ad['purchases']}</div></div>
+                                            <div>CPA <div class="list-val">${ad['cpa']:.2f}</div></div>
+                                            <div>ROAS <div class="list-val" style="color:{badge_color}">{roas_val}x</div></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </a>""", unsafe_allow_html=True)
+                else: st.info("No active creatives found in this date range.")
+
+            with tab4:
+                st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
+            st.markdown("<br><br><br>", unsafe_allow_html=True)
+        else: st.info("👈 Select Date Range to begin.")
+
+# --- RIGHT: CHAT ---
+with chat_col:
+    with st.container(height=780, border=False):
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                st.markdown(f"""<div class="chat-row user-row"><div class="chat-bubble user-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
+            else:
+                st.markdown(f"""<div class="chat-row bot-row"><div class="chat-bubble bot-bubble">{msg['content']}</div></div>""", unsafe_allow_html=True)
+        st.markdown("<br><br><br>", unsafe_allow_html=True)
+
+if prompt := st.chat_input("Ask about your data..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    save_memory("user", prompt)
+    try:
+        client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        context_str = ""
+        if 'context' in st.session_state:
+            ctx = st.session_state['context']
+            s_data, m_data = ctx['shopify'], ctx['meta']
+            ads_txt = "\n".join([f"{a['name']}: {a['roas']}x ROAS (${a['spend']})" for a in m_data['gallery_ads'][:10]])
+            context_str = f"OVERVIEW:\nBlended MER: {ctx['blended_mer']:.2f}x\nNet Profit: ${ctx['total_net_profit']:,.2f}\nRevenue: ${s_data['total_sales']}\nOrders: {s_data['order_count']}\nAd Spend: ${m_data['total_spend']}\nROAS: {ctx['roas']:.2f}x\n\nNEW vs RET:\nNew Rev: ${s_data['new_cust_rev']}\nReturning: ${s_data['ret_cust_rev']}\n\nTOP ADS:\n{ads_txt}\n\nCAMPAIGNS:\n{m_data['campaign_df'].to_string(index=False)}"
+        
+        history = st.session_state.messages[-30:] if len(st.session_state.messages) > 30 else st.session_state.messages
+        final_prompt = f"You are a Senior Media Buyer. Use this data:\n{context_str}"
+        stream = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": final_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history], stream=True)
+        
+        response_text = ""
+        for chunk in stream:
+            if chunk.choices[0].delta.content: response_text += chunk.choices[0].delta.content
+        st.session_state.messages.append({"role": "assistant", "content": response_text})
+        save_memory("assistant", response_text)
+        st.rerun()
+    except Exception as e: st.error(f"Error: {e}")
