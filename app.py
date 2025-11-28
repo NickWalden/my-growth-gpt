@@ -112,17 +112,17 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
 
 def fetch_ad_creatives_batch(token, ad_ids):
     """
-    Step 2: Fetch Creative Data (High Res Images & Links)
+    Step 2: Fetch Creative Data.
+    UPGRADE: Prioritize 'full_picture' from object_story_spec for HD quality.
     """
     if not ad_ids: return {}
-    creative_map = {}
+    image_map = {}
     
     chunks = [ad_ids[i:i + 50] for i in range(0, len(ad_ids), 50)]
     
     for chunk in chunks:
         try:
             ids_str = ",".join(chunk)
-            # UPGRADE: Requesting effective_object_story_id for links + full_picture for resolution
             url = f"https://graph.facebook.com/v17.0/?ids={ids_str}&fields=creative{{image_url,thumbnail_url,object_story_spec,asset_feed_spec,effective_object_story_id,instagram_permalink_url}}&access_token={token}"
             res = requests.get(url)
             
@@ -133,14 +133,16 @@ def fetch_ad_creatives_batch(token, ad_ids):
                     img = None
                     link = None
                     
-                    # --- 1. RESOLUTION LOGIC ---
+                    # --- 1. RESOLUTION LOGIC (HD FIRST) ---
                     
                     # A. Check Object Story (Standard Ads) - usually has 'full_picture'
                     try:
                         spec = creative.get('object_story_spec', {})
-                        # Link Data 'full_picture' is often highest res
-                        img = spec.get('link_data', {}).get('full_picture') or \
-                              spec.get('link_data', {}).get('picture')
+                        # Link Data 'full_picture' is the 1080p asset
+                        img = spec.get('link_data', {}).get('full_picture')
+                        
+                        # Fallback to standard picture
+                        if not img: img = spec.get('link_data', {}).get('picture')
                         
                         # Photo Data
                         if not img: img = spec.get('photo_data', {}).get('url')
@@ -160,46 +162,33 @@ def fetch_ad_creatives_batch(token, ad_ids):
                     if not img: img = creative.get('image_url') or creative.get('thumbnail_url')
                     
                     # --- 2. LINK LOGIC ---
-                    
-                    # A. Instagram Link
                     link = creative.get('instagram_permalink_url')
-                    
-                    # B. Facebook Post Link (effective_object_story_id)
                     if not link:
                         post_id = creative.get('effective_object_story_id')
-                        if post_id:
-                            link = f"https://www.facebook.com/{post_id}"
+                        if post_id: link = f"https://www.facebook.com/{post_id}"
                             
-                    # C. Fallback to Ad Library (using ID) - constructed in UI if needed
-                    
                     if img:
-                        creative_map[ad_id] = {"img": img, "link": link}
+                        image_map[ad_id] = {"img": img, "link": link}
                         
         except Exception: pass
         
-    return creative_map
+    return image_map
 
 def fetch_meta_data(token, account_id, start_date, end_date):
     try:
         base_url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
         time_range = json.dumps({'since': start_date.strftime('%Y-%m-%d'), 'until': end_date.strftime('%Y-%m-%d')})
         
-        # 1. Campaign Level
         cmp_params = {'access_token': token, 'time_range': time_range, 'level': 'campaign', 'fields': 'campaign_name,spend,clicks,impressions,actions,action_values,cpm,ctr,cpc', 'limit': 100}
         cmp_res = requests.get(base_url, params=cmp_params)
         
-        # 2. Daily Spend
         daily_params = {'access_token': token, 'time_range': time_range, 'level': 'account', 'time_increment': 1, 'fields': 'spend,date_start', 'limit': 100}
         daily_res = requests.get(base_url, params=daily_params)
         
-        # 3. Ad Level
         ad_params = {
-            'access_token': token, 
-            'time_range': time_range, 
-            'level': 'ad',
+            'access_token': token, 'time_range': time_range, 'level': 'ad',
             'fields': 'ad_id,ad_name,spend,ctr,cpm,action_values', 
-            'limit': 50, 
-            'sort': ['spend_descending']
+            'limit': 50, 'sort': ['spend_descending']
         }
         ad_res = requests.get(base_url, params=ad_params)
 
@@ -232,20 +221,18 @@ def fetch_meta_data(token, account_id, start_date, end_date):
                 actions = a.get('action_values', [])
                 sales_val = sum([float(act['value']) for act in actions if act['action_type'] == 'purchase']) if actions else 0
                 ad_id = a.get('ad_id') or a.get('id')
-                
                 if ad_id:
                     ad_ids_to_fetch.append(ad_id)
                     gallery_ads.append({
-                        "id": ad_id,
-                        "name": a['ad_name'], "spend": spend, 
+                        "id": ad_id, "name": a['ad_name'], "spend": spend, 
                         "roas": round(sales_val/spend, 2) if spend>0 else 0,
                         "ctr": float(a.get('ctr', 0)), "cpm": float(a.get('cpm', 0))
                     })
         
         if ad_ids_to_fetch:
-            creative_map = fetch_ad_creatives_batch(token, list(set(ad_ids_to_fetch)))
+            image_map = fetch_ad_creatives_batch(token, list(set(ad_ids_to_fetch)))
             for ad in gallery_ads:
-                details = creative_map.get(ad['id'], {})
+                details = image_map.get(ad['id'], {})
                 ad['image_url'] = details.get('img')
                 ad['link'] = details.get('link')
 
@@ -340,20 +327,21 @@ st.markdown(f"""
     div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
     
     /* GALLERY STYLES */
-    .ad-card {{ background-color: #111; border: 1px solid #222; border-radius: 12px; overflow: hidden; margin-bottom: 20px; transition: transform 0.2s; position: relative; aspect-ratio: 4/5; cursor: pointer; }}
+    .ad-card {{ background-color: #111; border: 1px solid #222; border-radius: 12px; overflow: hidden; margin-bottom: 20px; transition: transform 0.2s; position: relative; display: flex; flex-direction: column; }}
     .ad-card:hover {{ border-color: #444; transform: translateY(-2px); z-index: 10; }}
-    .ad-bg {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-size: cover; background-position: center; filter: blur(10px) brightness(0.5); z-index: 1; }}
-    .ad-image {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover !important; z-index: 2; }}
+    /* Standard Card Image - Force Aspect Ratio or Height */
+    .ad-image-container {{ position: relative; width: 100%; height: 200px; background-color: #000; overflow: hidden; }}
+    .ad-bg {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-size: cover; background-position: center; filter: blur(20px) brightness(0.5); z-index: 1; }}
+    .ad-image {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }}
     
-    .ad-overlay {{ position: absolute; bottom: 0; left: 0; width: 100%; background: rgba(0,0,0,0.85); padding: 10px; transform: translateY(100%); transition: transform 0.2s ease; z-index: 3; border-top: 1px solid #333; }}
-    .ad-card:hover .ad-overlay {{ transform: translateY(0); }}
+    /* Permanent Footer */
+    .ad-footer {{ background-color: #161616; padding: 10px; border-top: 1px solid #222; flex-grow: 1; }}
+    .ad-title {{ font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
     .ad-badge-top {{ position: absolute; top: 8px; right: 8px; z-index: 4; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; backdrop-filter: blur(4px); }}
-    .ad-link-icon {{ position: absolute; top: 8px; left: 8px; z-index: 4; padding: 4px; border-radius: 50%; background: rgba(0,0,0,0.6); color: white; backdrop-filter: blur(4px); opacity: 0; transition: opacity 0.2s; }}
-    .ad-card:hover .ad-link-icon {{ opacity: 1; }}
+    .ad-link-icon {{ position: absolute; top: 8px; left: 8px; z-index: 4; padding: 4px; border-radius: 50%; background: rgba(0,0,0,0.6); color: white; backdrop-filter: blur(4px); }}
     
-    .text-sm {{ font-size: 11px; color: #aaa; margin-bottom: 2px; }}
-    .text-val {{ font-size: 13px; font-weight: 600; color: #fff; }}
-    .row-split {{ display: flex; justify-content: space-between; }}
+    .row-split {{ display: flex; justify-content: space-between; font-size: 12px; color: #888; margin-top: 4px; }}
+    .text-val {{ font-weight: 600; color: #ccc; }}
     
     a {{ text-decoration: none; color: inherit; }}
 </style>
@@ -407,23 +395,25 @@ with dash_col:
                             elif roas_val >= 1.5: badge_color = "rgba(255, 214, 0, 0.9); color: #000;"
                             else: badge_color = "rgba(255, 61, 0, 0.9); color: #fff;"
                             
-                            # Ad Link (Default to Ad Library search if no direct link found)
                             link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
                             
                             st.markdown(f"""
                             <a href="{link}" target="_blank">
                                 <div class="ad-card">
-                                    <div class="ad-bg" style="background-image: url('{img_src}');"></div>
-                                    <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
-                                    
-                                    <div class="ad-link-icon">↗</div>
-                                    <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
-                                    
-                                    <div class="ad-overlay">
-                                        <div class="text-val" style="margin-bottom:5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{ad['name']}</div>
+                                    <div class="ad-image-container">
+                                        <div class="ad-bg" style="background-image: url('{img_src}');"></div>
+                                        <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
+                                        <div class="ad-link-icon">↗</div>
+                                        <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
+                                    </div>
+                                    <div class="ad-footer">
+                                        <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
                                         <div class="row-split">
-                                            <div><div class="text-sm">Spend</div><div class="text-val">${ad['spend']:,.0f}</div></div>
-                                            <div style="text-align:right;"><div class="text-sm">CTR</div><div class="text-val">{ad['ctr']:.2f}%</div></div>
+                                            <div><span style="color:#888;">Spend</span> <span class="text-val">${ad['spend']:,.0f}</span></div>
+                                            <div><span style="color:#888;">CPM</span> <span class="text-val">${ad['cpm']:.2f}</span></div>
+                                        </div>
+                                        <div class="row-split">
+                                            <div><span style="color:#888;">CTR</span> <span class="text-val">{ad['ctr']:.2f}%</span></div>
                                         </div>
                                     </div>
                                 </div>
