@@ -71,16 +71,17 @@ def fetch_meta_campaigns(token, account_id):
         else: return None, 0, f"Meta Error {res.status_code}: {res.text}"
     except Exception as e: return None, 0, f"Meta Crash: {e}"
 
-# --- 4. APP STATE & CONTROLS ---
+# --- 4. APP STATE & SIDEBAR ---
 
 if 'messages' not in st.session_state: st.session_state.messages = load_memory()
 if 'logs' not in st.session_state: st.session_state.logs = []
 
 with st.sidebar:
-    st.markdown("### ⚙️ Settings")
+    st.markdown("### ⚙️ Console Settings")
     
-    chat_width_pct = st.slider("Chat Width", 20, 50, 30, 5, format="%d%%")
-    font_size = st.slider("Text Size", 12, 24, 14, 1, format="%dpx")
+    # SLIDERS
+    chat_width_pct = st.slider("Chat Width", 20, 60, 30, 5, format="%d%%")
+    font_size = st.slider("Text Size", 12, 24, 15, 1, format="%dpx")
     
     st.divider()
     
@@ -116,7 +117,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# --- 5. FIXED CSS SCROLLING ARCHITECTURE ---
+# --- 5. CSS ARCHITECTURE ---
 st.markdown(f"""
 <style>
     /* GLOBAL RESET */
@@ -125,50 +126,24 @@ st.markdown(f"""
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         background-color: #000000;
         color: #ffffff;
-        height: 100vh; /* Force Full Height */
-        overflow: hidden !important; /* LOCK MAIN SCROLL */
     }}
     
+    /* HIDE HEADER & LOCK PAGE SCROLL */
     header[data-testid="stHeader"] {{ display: none; }}
-
-    /* --- THE SCROLL FIX --- */
-    
-    /* 1. Force the Main Container to fill screen but NOT scroll itself */
     .block-container {{
         max-width: 100%;
         padding: 1rem 1rem 0 1rem;
-        height: 100vh;
-        overflow: hidden !important;
-    }}
-    
-    /* 2. Target the Columns and force THEM to scroll */
-    div[data-testid="column"] {{
-        height: 94vh;           /* Take up almost full height */
-        overflow-y: auto;       /* Enable Vertical Scroll */
-        overflow-x: hidden;     /* Disable Horizontal Scroll */
-        display: block;
-        scrollbar-width: thin;  /* Firefox thin scrollbar */
-        scrollbar-color: #333 #000;
-    }}
-    
-    /* Chrome/Safari Scrollbar Styling */
-    div[data-testid="column"]::-webkit-scrollbar {{ width: 6px; }}
-    div[data-testid="column"]::-webkit-scrollbar-track {{ background: #000; }}
-    div[data-testid="column"]::-webkit-scrollbar-thumb {{ background: #333; border-radius: 4px; }}
-    div[data-testid="column"]::-webkit-scrollbar-thumb:hover {{ background: #555; }}
-
-    /* Right Column (Chat) specific padding for sticky input */
-    div[data-testid="column"]:nth-of-type(2) > div {{
-        padding-bottom: 150px !important; /* Space for input box */
+        overflow: hidden; /* Stops whole page from scrolling */
     }}
 
     /* --- STICKY INPUT POSITIONING --- */
+    /* Dynamically calculated based on slider */
     [data-testid="stChatInput"] {{
         position: fixed !important;
         bottom: 0 !important;
         right: 1.5rem !important;
         left: auto !important;
-        width: {chat_width_pct-2}% !important; /* Slightly smaller to fit padding */
+        width: calc({chat_width_pct}% - 2rem) !important; /* Subtract padding */
         min-width: 300px;
         background-color: #111111 !important;
         z-index: 9999 !important;
@@ -178,26 +153,31 @@ st.markdown(f"""
     }}
     
     /* --- TEXT SIZING FIX --- */
-    /* We apply the font size to the generic class AND specific classes with !important */
-    .chat-bubble, .user-bubble, .bot-bubble {{
+    /* Target all content inside bubbles */
+    .chat-bubble, .chat-bubble p, .chat-bubble span {{
         font-size: {font_size}px !important; 
         line-height: 1.5;
-        padding: 10px 14px;
-        border-radius: 16px;
+    }}
+    
+    /* Bubble Structure */
+    .chat-bubble {{
+        padding: 12px 16px;
+        border-radius: 18px;
         max-width: 85%;
         position: relative;
         word-wrap: break-word;
+        margin-bottom: 2px;
     }}
 
     /* Colors */
     .user-bubble {{ background-color: #0A84FF; color: white; border-bottom-right-radius: 2px; }}
     .bot-bubble {{ background-color: #262626; color: #E5E5EA; border: 1px solid #333; border-bottom-left-radius: 2px; }}
     
-    /* Metrics */
-    div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
+    /* UI Utilities */
     .chat-row {{ display: flex; margin-bottom: 12px; width: 100%; }}
     .user-row {{ justify-content: flex-end; }}
     .bot-row {{ justify-content: flex-start; }}
+    div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
 
 </style>
 """, unsafe_allow_html=True)
@@ -206,75 +186,85 @@ st.markdown(f"""
 # 🖥️ SPLIT LAYOUT
 # ==========================================
 
-dash_col, chat_col = st.columns([100-chat_width_pct, chat_width_pct], gap="large")
+# Use gap="large" for visual separation
+dash_col, chat_col = st.columns([100-chat_width_pct, chat_width_pct], gap="medium")
 
 # ------------------------------------------
 # 📊 LEFT: DASHBOARD
 # ------------------------------------------
 with dash_col:
-    st.markdown("## Overview")
-    
-    if 'context' in st.session_state:
-        ctx = st.session_state['context']
+    # Use st.container(height=...) to create an INDEPENDENT SCROLL AREA
+    # border=False makes it look seamless
+    with st.container(height=850, border=False):
+        st.markdown("## Overview")
         
-        # Metrics
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Revenue", f"${ctx['total_sales']:,.0f}")
-        c2.metric("Spend", f"${ctx['total_spend']:,.0f}")
-        c3.metric("ROAS", f"{ctx['roas']:.2f}x")
-        c4.metric("Profit", f"${(ctx['total_sales']*0.6 - ctx['total_spend']):,.0f}")
-        
-        st.markdown("---")
-        
-        # Chart
-        st.subheader("Sales Trend")
-        if not ctx['daily_sales'].empty:
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=ctx['daily_sales']['date'], y=ctx['daily_sales']['sales'], marker_color='#0A84FF', marker_line_width=0, opacity=0.9))
-            fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=10, b=0), height=350, xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor='#333'))
-            st.plotly_chart(fig, use_container_width=True)
+        if 'context' in st.session_state:
+            ctx = st.session_state['context']
+            
+            # Metrics
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Revenue", f"${ctx['total_sales']:,.0f}")
+            c2.metric("Spend", f"${ctx['total_spend']:,.0f}")
+            c3.metric("ROAS", f"{ctx['roas']:.2f}x")
+            c4.metric("Profit", f"${(ctx['total_sales']*0.6 - ctx['total_spend']):,.0f}")
+            
+            st.markdown("---")
+            
+            # Chart
+            st.subheader("Sales Trend")
+            if not ctx['daily_sales'].empty:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=ctx['daily_sales']['date'], y=ctx['daily_sales']['sales'], marker_color='#0A84FF', marker_line_width=0, opacity=0.9))
+                fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=10, b=0), height=350, xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor='#333'))
+                st.plotly_chart(fig, use_container_width=True)
 
-        # Table
-        st.subheader("Campaigns")
-        if not ctx['campaigns'].empty:
-            st.dataframe(
-                ctx['campaigns'].sort_values("Spend", ascending=False),
-                column_config={
-                    "Spend": st.column_config.NumberColumn(format="$%.0f"),
-                    "Sales": st.column_config.NumberColumn(format="$%.0f"),
-                    "ROAS": st.column_config.NumberColumn(format="%.2fx"),
-                    "Clicks": st.column_config.NumberColumn(format="%d")
-                },
-                hide_index=True,
-                use_container_width=True
-            )
-            # Extra spacer for scrolling
-            st.markdown("<br><br><br><br>", unsafe_allow_html=True)
-    else:
-        st.info("👈 Sync Data from the sidebar to begin.")
+            # Table
+            st.subheader("Campaigns")
+            if not ctx['campaigns'].empty:
+                st.dataframe(
+                    ctx['campaigns'].sort_values("Spend", ascending=False),
+                    column_config={
+                        "Spend": st.column_config.NumberColumn(format="$%.0f"),
+                        "Sales": st.column_config.NumberColumn(format="$%.0f"),
+                        "ROAS": st.column_config.NumberColumn(format="%.2fx"),
+                        "Clicks": st.column_config.NumberColumn(format="%d")
+                    },
+                    hide_index=True,
+                    use_container_width=True
+                )
+                st.markdown("<br><br>", unsafe_allow_html=True)
+        else:
+            st.info("👈 Sync Data from the sidebar to begin.")
 
 # ------------------------------------------
-# 💬 RIGHT: CHAT
+# 💬 RIGHT: CHAT CONSOLE
 # ------------------------------------------
 with chat_col:
     st.markdown("### AI Strategist")
     
-    chat_html = ""
-    for msg in st.session_state.messages:
-        if msg["role"] == "user":
-            chat_html += f"""
-            <div class="chat-row user-row">
-                <div class="chat-bubble user-bubble">{msg['content']}</div>
-            </div>
-            """
-        else:
-            chat_html += f"""
-            <div class="chat-row bot-row">
-                <div class="chat-bubble bot-bubble">{msg['content']}</div>
-            </div>
-            """
-            
-    st.markdown(chat_html, unsafe_allow_html=True)
+    # INDEPENDENT SCROLL AREA FOR CHAT
+    # Note: We create a container to hold the chat history.
+    # The Chat Input stays OUTSIDE this container (fixed to bottom)
+    with st.container(height=780, border=False):
+        
+        # Render Custom HTML Chat
+        chat_html = '<div style="padding-bottom: 20px;">' 
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                chat_html += f"""
+                <div class="chat-row user-row">
+                    <div class="chat-bubble user-bubble">{msg['content']}</div>
+                </div>
+                """
+            else:
+                chat_html += f"""
+                <div class="chat-row bot-row">
+                    <div class="chat-bubble bot-bubble">{msg['content']}</div>
+                </div>
+                """
+        chat_html += "</div>"
+        
+        st.markdown(chat_html, unsafe_allow_html=True)
 
 # ------------------------------------------
 # ⌨️ GLOBAL INPUT
