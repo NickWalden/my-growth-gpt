@@ -9,14 +9,13 @@ import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
-# --- 1. CONFIGURATION ---
+# --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
     page_title="Growth OS",
     page_icon="",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-AI_MODEL = "gpt-4o"
 
 # --- 2. MEMORY FUNCTIONS ---
 def load_memory():
@@ -252,7 +251,7 @@ def generate_briefing(ctx, s_data, m_data):
             "campaigns": m_data['campaign_df'].head(5).to_dict('records')
         }
         system_prompt = """You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys: {"headline": "A short, punchy 1-sentence summary.", "wins": ["Bullet 1", "Bullet 2"], "warnings": ["Bullet 1", "Bullet 2"], "action_plan": "One clear strategic recommendation.", "suggested_questions": ["Question 1", "Question 2", "Question 3"]} Do not include markdown formatting. Return RAW JSON only."""
-        response = client.chat.completions.create(model=AI_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload, default=safe_serialize)}], response_format={"type": "json_object"})
+        response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload, default=safe_serialize)}], response_format={"type": "json_object"})
         return json.loads(response.choices[0].message.content)
     except Exception: return {"headline": "Analysis Unavailable", "wins": [], "warnings": [], "action_plan": "Check API keys.", "suggested_questions": []}
 
@@ -320,22 +319,11 @@ def run_sync_logic():
                     "roas": shop_data['total_sales'] / meta_data['total_spend'] if meta_data['total_spend'] > 0 else 0
                 }
                 st.session_state['context'] = ctx
-                
-                # BRIEFING GENERATION
                 briefing = generate_briefing(ctx, shop_data, meta_data)
-                wins_items = "".join([f"<div class='briefing-item'><span class='briefing-icon'>✅</span>{x}</div>" for x in briefing.get('wins', [])])
-                warn_items = "".join([f"<div class='briefing-item'><span class='briefing-icon'>⚠️</span>{x}</div>" for x in briefing.get('warnings', [])])
                 
-                # FIX: Replaced explicit dollar signs with HTML Entity &#36; to prevent Markdown math parsing
-                briefing_html = (
-                    f"<div class='briefing-card'>"
-                    f"<div class='briefing-head'>⚡ DAILY INTELLIGENCE</div>"
-                    f"<div style='font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;'>{briefing.get('headline')}</div>"
-                    f"<div style='margin-bottom: 10px;'><div style='color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WINS</div>{wins_items}</div>"
-                    f"<div style='margin-bottom: 10px;'><div style='color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WARNINGS</div>{warn_items}</div>"
-                    f"<div style='margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;'><div style='color: #0A84FF; font-size: 12px; font-weight: 600;'>RECOMMENDATION</div>"
-                    f"<div style='font-size: 13px; color: #ccc;'>{briefing.get('action_plan')}</div></div></div>"
-                )
+                wins_html = "".join([f"<div class='briefing-item'><span class='briefing-icon'>✅</span>{x}</div>" for x in briefing.get('wins', [])])
+                warn_html = "".join([f"<div class='briefing-item'><span class='briefing-icon'>⚠️</span>{x}</div>" for x in briefing.get('warnings', [])])
+                briefing_html = f"<div class='briefing-card'><div class='briefing-head'>⚡ DAILY INTELLIGENCE</div><div style='font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;'>{briefing.get('headline')}</div><div style='margin-bottom: 10px;'><div style='color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WINS</div>{wins_html}</div><div style='margin-bottom: 10px;'><div style='color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WARNINGS</div>{warn_html}</div><div style='margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;'><div style='color: #0A84FF; font-size: 12px; font-weight: 600;'>RECOMMENDATION</div><div style='font-size: 13px; color: #ccc;'>{briefing.get('action_plan')}</div></div></div>"
                 
                 st.session_state.messages.append({"role": "assistant", "content": briefing_html, "suggestions": briefing.get('suggested_questions', [])})
                 save_memory("assistant", briefing_html, briefing.get('suggested_questions', []))
@@ -366,8 +354,6 @@ st.markdown(f"""
     .user-row {{ justify-content: flex-end; }}
     .bot-row {{ justify-content: flex-start; }}
     div[data-testid="stMetric"] {{ background-color: #111; border: 1px solid #222; padding: 15px; border-radius: 12px; }}
-    
-    /* GALLERY STYLES */
     .ad-card {{ background-color: #111; border: 1px solid #222; border-radius: 12px; overflow: hidden; margin-bottom: 20px; transition: transform 0.2s; position: relative; display: flex; flex-direction: column; }}
     .ad-card:hover {{ border-color: #444; transform: translateY(-2px); z-index: 10; }}
     .ad-image-container {{ position: relative; width: 100%; height: 220px; background-color: #000; overflow: hidden; }}
@@ -383,8 +369,6 @@ st.markdown(f"""
     .context-tag {{ font-size: 10px; background: #222; padding: 2px 6px; border-radius: 4px; color: #888; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }}
     .btn-view {{ display: block; width: 100%; text-align: center; background: #222; color: #ccc; font-size: 11px; padding: 6px 0; border-radius: 6px; margin-top: 8px; transition: background 0.2s; }}
     .btn-view:hover {{ background: #333; color: white; }}
-    
-    /* LIST VIEW */
     .list-row {{ display: flex; background: #111; border: 1px solid #222; border-radius: 12px; margin-bottom: 10px; overflow: hidden; transition: all 0.2s; color: inherit; text-decoration: none; }}
     .list-row:hover {{ border-color: #444; transform: translateX(4px); }}
     .list-img {{ width: 100px; height: 100px; object-fit: cover; border-right: 1px solid #222; }}
@@ -393,7 +377,6 @@ st.markdown(f"""
     .list-metrics {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; text-align: right; min-width: 250px; font-size: 11px; color: #888; }}
     .list-val {{ font-size: 13px; font-weight: 600; color: #eee; }}
     .list-badge {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; margin-left: 10px; }}
-    
     .briefing-card {{ background: #1E1E1E; border: 1px solid #0A84FF; border-radius: 12px; padding: 15px; margin-bottom: 20px; }}
     .briefing-head {{ color: #0A84FF; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; }}
     .briefing-item {{ margin-bottom: 4px; display: flex; align-items: flex-start; }}
@@ -414,13 +397,22 @@ with dash_col:
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
-            c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
-            c2.metric("Orders", f"{s_data['order_count']:,}")
-            c3.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
-            c4.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
-            c5.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
-            c6.metric("FB ROAS", f"{ctx['roas']:.2f}x")
+            
+            # --- 2 ROW METRICS ---
+            # Row 1
+            r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+            r1c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
+            r1c2.metric("Orders", f"{s_data['order_count']:,}")
+            r1c3.metric("AOV", f"${s_data['aov']:.2f}")
+            r1c4.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
+            
+            # Row 2
+            r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+            r2c1.metric("Ad Spend", f"${m_data['total_spend']:,.0f}")
+            r2c2.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
+            r2c3.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
+            r2c4.metric("FB ROAS", f"{ctx['roas']:.2f}x")
+            
             st.markdown("---")
             
             tab1, tab2, tab3, tab4 = st.tabs(["Growth (New vs Ret)", "Profit Chart", "Creative Gallery", "Campaigns"])
@@ -457,56 +449,14 @@ with dash_col:
                                 roas_val = ad['roas']
                                 badge_color = "rgba(0, 200, 83, 0.9); color: #fff;" if roas_val >= 3.0 else "rgba(255, 214, 0, 0.9); color: #000;" if roas_val >= 1.5 else "rgba(255, 61, 0, 0.9); color: #fff;"
                                 link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
-                                # FIX: REPLACED $ WITH &#36; IN HTML
-                                st.markdown(f"""
-                                <a href="{link}" target="_blank" class="ad-link">
-                                    <div class="ad-card">
-                                        <div class="ad-image-container">
-                                            <div class="ad-bg" style="background-image: url('{img_src}');"></div>
-                                            <img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
-                                            <div class="ad-link-icon">↗</div>
-                                            <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
-                                        </div>
-                                        <div class="ad-footer">
-                                            <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
-                                            <div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div>
-                                            <div class="grid-stats">
-                                                <div class="stat-box">Spend <div class="text-val">&#36;{ad['spend']:,.0f}</div></div>
-                                                <div class="stat-box" style="text-align:right;">Rev <div class="text-val">&#36;{ad['revenue']:,.0f}</div></div>
-                                                <div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div>
-                                                <div class="stat-box" style="text-align:right;">CPA <div class="text-val">&#36;{ad['cpa']:.2f}</div></div>
-                                                <div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div>
-                                                <div class="stat-box" style="text-align:right;">CPM <div class="text-val">&#36;{ad['cpm']:.2f}</div></div>
-                                            </div>
-                                            <div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div>
-                                        </div>
-                                    </div>
-                                </a>""", unsafe_allow_html=True)
+                                st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="ad-card"><div class="ad-image-container"><div class="ad-bg" style="background-image: url('{img_src}');"></div><img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'"><div class="ad-link-icon">↗</div><div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div></div><div class="ad-footer"><div class="ad-title" title="{ad['name']}">{ad['name']}</div><div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div><div class="grid-stats"><div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div><div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div><div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div><div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div><div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div><div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div></div><div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div></div></div></a>""", unsafe_allow_html=True)
                     else:
                         for ad in ads:
                             img_src = ad.get('image_url') or "https://via.placeholder.com/100x100/222/888?text=Img"
                             roas_val = ad['roas']
                             badge_color = "#00E676" if roas_val >= 3.0 else "#FFD600" if roas_val >= 1.5 else "#FF3D00"
                             link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
-                            # FIX: REPLACED $ WITH &#36; IN HTML
-                            st.markdown(f"""
-                            <a href="{link}" target="_blank" class="ad-link">
-                                <div class="list-row">
-                                    <img src="{img_src}" class="list-img" onerror="this.src='https://via.placeholder.com/100x100/222/888?text=Ad'">
-                                    <div class="list-content">
-                                        <div class="list-info">
-                                            <div style="font-weight:600; color:#fff; font-size:13px; margin-bottom:4px;">{ad['name']}</div>
-                                            <div style="font-size:11px; color:#666;">{ad['campaign']} • Live {ad['days_live']}d</div>
-                                        </div>
-                                        <div class="list-metrics">
-                                            <div>Spend <div class="list-val">&#36;{ad['spend']:,.0f}</div></div>
-                                            <div>Sales <div class="list-val">{ad['purchases']}</div></div>
-                                            <div>CPA <div class="list-val">&#36;{ad['cpa']:.2f}</div></div>
-                                            <div>ROAS <div class="list-val" style="color:{badge_color}">{roas_val}x</div></div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </a>""", unsafe_allow_html=True)
+                            st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="list-row"><img src="{img_src}" class="list-img" onerror="this.src='https://via.placeholder.com/100x100/222/888?text=Ad'"><div class="list-content"><div class="list-info"><div style="font-weight:600; color:#fff; font-size:13px; margin-bottom:4px;">{ad['name']}</div><div style="font-size:11px; color:#666;">{ad['campaign']} • Live {ad['days_live']}d</div></div><div class="list-metrics"><div>Spend <div class="list-val">${ad['spend']:,.0f}</div></div><div>Sales <div class="list-val">{ad['purchases']}</div></div><div>CPA <div class="list-val">${ad['cpa']:.2f}</div></div><div>ROAS <div class="list-val" style="color:{badge_color}">{roas_val}x</div></div></div></div></div></a>""", unsafe_allow_html=True)
                 else: st.info("No active creatives found in this date range.")
             with tab4:
                 st.dataframe(m_data['campaign_df'].sort_values("Spend", ascending=False), column_config={"Spend": st.column_config.NumberColumn(format="$%.0f"), "Sales": st.column_config.NumberColumn(format="$%.0f"), "ROAS": st.column_config.NumberColumn(format="%.2fx"), "CTR": st.column_config.NumberColumn(format="%.2f%%")}, hide_index=True, use_container_width=True)
