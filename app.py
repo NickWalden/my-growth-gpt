@@ -48,7 +48,10 @@ def save_memory(role, content, suggestions=None):
         conn.update(worksheet="ChatHistory", data=updated_data)
     except Exception: pass
 
-# --- 3. DATA FETCHING ---
+# --- 3. DATA FETCHING (WITH CACHING) ---
+
+# CACHE: Store cost data for 1 hour so we don't spam Shopify
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_product_costs(domain, token, variant_ids):
     if not variant_ids: return {}
     cost_map = {}
@@ -76,6 +79,8 @@ def get_product_costs(domain, token, variant_ids):
     except Exception: pass
     return cost_map
 
+# CACHE: Remember Shopify results for specific date ranges
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
     try:
         start_iso = start_date.strftime('%Y-%m-%dT00:00:00')
@@ -149,6 +154,8 @@ def fetch_shopify_data(domain, token, fallback_margin, start_date, end_date):
         }, None
     except Exception as e: return None, f"Shopify Crash: {e}"
 
+# CACHE: Don't re-download images we've already seen
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_ad_creatives_batch(token, ad_ids):
     if not ad_ids: return {}
     image_map = {}
@@ -181,6 +188,8 @@ def fetch_ad_creatives_batch(token, ad_ids):
         except Exception: pass
     return image_map
 
+# CACHE: Remember Meta results for specific date ranges
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_meta_data(token, account_id, start_date, end_date):
     try:
         base_url = f"https://graph.facebook.com/v17.0/act_{account_id}/insights"
@@ -281,7 +290,12 @@ with st.sidebar:
     font_size = st.slider("Text Size", 12, 24, 14, 1, format="%dpx")
     margin_pct = st.slider("Margin %", 10, 90, 60, 5, format="%d%%") / 100.0
     st.divider()
-    if st.button("🔄 Force Sync", type="secondary", use_container_width=True): st.session_state.last_synced_dates = None; st.rerun()
+    if st.button("🔄 Force Sync", type="secondary", use_container_width=True): 
+        # Clear cache to force fresh data pull
+        fetch_shopify_data.clear()
+        fetch_meta_data.clear()
+        st.session_state.last_synced_dates = None
+        st.rerun()
     if st.session_state.logs:
         with st.expander(f"⚠️ Logs ({len(st.session_state.logs)})"):
             for err in st.session_state.logs: st.error(err)
@@ -321,9 +335,9 @@ def run_sync_logic():
                 st.session_state['context'] = ctx
                 briefing = generate_briefing(ctx, shop_data, meta_data)
                 
-                wins_html = "".join([f"<div class='briefing-item'><span class='briefing-icon'>✅</span>{x}</div>" for x in briefing.get('wins', [])])
-                warn_html = "".join([f"<div class='briefing-item'><span class='briefing-icon'>⚠️</span>{x}</div>" for x in briefing.get('warnings', [])])
-                briefing_html = f"<div class='briefing-card'><div class='briefing-head'>⚡ DAILY INTELLIGENCE</div><div style='font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;'>{briefing.get('headline')}</div><div style='margin-bottom: 10px;'><div style='color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WINS</div>{wins_html}</div><div style='margin-bottom: 10px;'><div style='color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WARNINGS</div>{warn_html}</div><div style='margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;'><div style='color: #0A84FF; font-size: 12px; font-weight: 600;'>RECOMMENDATION</div><div style='font-size: 13px; color: #ccc;'>{briefing.get('action_plan')}</div></div></div>"
+                wins_items = "".join([f"<div class='briefing-item'><span class='briefing-icon'>✅</span>{x}</div>" for x in briefing.get('wins', [])])
+                warn_items = "".join([f"<div class='briefing-item'><span class='briefing-icon'>⚠️</span>{x}</div>" for x in briefing.get('warnings', [])])
+                briefing_html = f"<div class='briefing-card'><div class='briefing-head'>⚡ DAILY INTELLIGENCE</div><div style='font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #fff;'>{briefing.get('headline')}</div><div style='margin-bottom: 10px;'><div style='color: #00E676; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WINS</div>{wins_items}</div><div style='margin-bottom: 10px;'><div style='color: #FF3D00; font-size: 12px; font-weight: 600; margin-bottom: 4px;'>WARNINGS</div>{warn_items}</div><div style='margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;'><div style='color: #0A84FF; font-size: 12px; font-weight: 600;'>RECOMMENDATION</div><div style='font-size: 13px; color: #ccc;'>{briefing.get('action_plan')}</div></div></div>"
                 
                 st.session_state.messages.append({"role": "assistant", "content": briefing_html, "suggestions": briefing.get('suggested_questions', [])})
                 save_memory("assistant", briefing_html, briefing.get('suggested_questions', []))
@@ -334,7 +348,7 @@ def run_sync_logic():
 
 if st.session_state.last_synced_dates != (s_d, e_d): run_sync_logic()
 
-# --- 7. CSS ---
+# --- 8. CSS ---
 st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
@@ -397,22 +411,13 @@ with dash_col:
         if 'context' in st.session_state:
             ctx = st.session_state['context']
             s_data, m_data = ctx['shopify'], ctx['meta']
-            
-            # --- 2 ROW METRICS ---
-            # Row 1
-            r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-            r1c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
-            r1c2.metric("Orders", f"{s_data['order_count']:,}")
-            r1c3.metric("AOV", f"${s_data['aov']:.2f}")
-            r1c4.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
-            
-            # Row 2
-            r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-            r2c1.metric("Ad Spend", f"${m_data['total_spend']:,.0f}")
-            r2c2.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
-            r2c3.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
-            r2c4.metric("FB ROAS", f"{ctx['roas']:.2f}x")
-            
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            c1.metric("Revenue", f"${s_data['total_sales']:,.0f}")
+            c2.metric("Orders", f"{s_data['order_count']:,}")
+            c3.metric("True Profit", f"${ctx['total_net_profit']:,.0f}", delta="Net")
+            c4.metric("Blended MER", f"{ctx['blended_mer']:.2f}x", delta="Target: 3.0x")
+            c5.metric("nCPA", f"${ctx['ncpa']:.0f}", delta="New Cust", delta_color="inverse")
+            c6.metric("FB ROAS", f"{ctx['roas']:.2f}x")
             st.markdown("---")
             
             tab1, tab2, tab3, tab4 = st.tabs(["Growth (New vs Ret)", "Profit Chart", "Creative Gallery", "Campaigns"])
