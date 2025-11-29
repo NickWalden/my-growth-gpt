@@ -251,7 +251,7 @@ def generate_briefing(ctx, s_data, m_data):
             "campaigns": m_data['campaign_df'].head(5).to_dict('records')
         }
         system_prompt = """You are an elite eCommerce Analyst. Analyze the data and return a JSON object with exactly these keys: {"headline": "A short, punchy 1-sentence summary.", "wins": ["Bullet 1", "Bullet 2"], "warnings": ["Bullet 1", "Bullet 2"], "action_plan": "One clear strategic recommendation.", "suggested_questions": ["Question 1", "Question 2", "Question 3"]} Do not include markdown formatting. Return RAW JSON only."""
-        response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload, default=safe_serialize)}], response_format={"type": "json_object"})
+        response = client.chat.completions.create(model="gpt-5_1", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(analysis_payload, default=safe_serialize)}], response_format={"type": "json_object"})
         return json.loads(response.choices[0].message.content)
     except Exception: return {"headline": "Analysis Unavailable", "wins": [], "warnings": [], "action_plan": "Check API keys.", "suggested_questions": []}
 
