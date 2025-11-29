@@ -487,9 +487,10 @@ with dash_col:
     </div>
   </div>
 </a>
-""",
+"",
                                     unsafe_allow_html=True,
-                                )                    else:
+                                )
+                        else:
                         for ad in ads:
                             img_src = ad.get('image_url') or "https://via.placeholder.com/100x100/222/888?text=Img"
                             roas_val = ad['roas']
