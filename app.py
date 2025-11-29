@@ -447,11 +447,49 @@ with dash_col:
                         for i, ad in enumerate(ads):
                             with cols[i % 3]:
                                 img_src = ad.get('image_url') or "https://via.placeholder.com/300x300/222/888?text=No+Image"
-                                roas_val = ad['roas']
-                                badge_color = "rgba(0, 200, 83, 0.9); color: #fff;" if roas_val >= 3.0 else "rgba(255, 214, 0, 0.9); color: #000;" if roas_val >= 1.5 else "rgba(255, 61, 0, 0.9); color: #fff;"
-                                link = ad.get('link') or f"https://www.facebook.com/ads/library/?id={ad['id']}"
-                                st.markdown(f"""<a href="{link}" target="_blank" class="ad-link"><div class="ad-card"><div class="ad-image-container"><div class="ad-bg" style="background-image: url('{img_src}');"></div><img src="{img_src}" class="ad-image" onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'"><div class="ad-link-icon">↗</div><div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div></div><div class="ad-footer"><div class="ad-title" title="{ad['name']}">{ad['name']}</div><div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div><div class="grid-stats"><div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div><div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div><div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div><div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div><div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div><div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div></div><div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">Live for {ad['days_live']} days</div></div></div></a>""", unsafe_allow_html=True)
-                    else:
+                                roas_val = ad["roas"]
+                                badge_color = (
+                                    "rgba(0, 200, 83, 0.9); color: #fff;"
+                                    if roas_val >= 3.0
+                                    else "rgba(255, 214, 0, 0.9); color: #000;"
+                                    if roas_val >= 1.5
+                                    else "rgba(255, 61, 0, 0.9); color: #fff;"
+                                )
+                                link = ad.get("link") or (
+                                    "https://www.facebook.com/ads/library/?id="
+                                    f"{ad['id']}"
+                                )
+                                st.markdown(
+                                    f"""
+<a href="{link}" target="_blank" class="ad-link">
+  <div class="ad-card">
+    <div class="ad-image-container">
+      <div class="ad-bg" style="background-image: url('{img_src}');"></div>
+      <img src="{img_src}" class="ad-image"
+           onerror="this.src='https://via.placeholder.com/300x300/222/888?text=Video+Ad'">
+      <div class="ad-link-icon">↗</div>
+      <div class="ad-badge-top" style="background-color: {badge_color}">{roas_val}x</div>
+    </div>
+    <div class="ad-footer">
+      <div class="ad-title" title="{ad['name']}">{ad['name']}</div>
+      <div class="context-tag" title="Campaign: {ad['campaign']}">{ad['campaign']}</div>
+      <div class="grid-stats">
+        <div class="stat-box">Spend <div class="text-val">${ad['spend']:,.0f}</div></div>
+        <div class="stat-box" style="text-align:right;">Rev <div class="text-val">${ad['revenue']:,.0f}</div></div>
+        <div class="stat-box">Sales <div class="text-val">{ad['purchases']}</div></div>
+        <div class="stat-box" style="text-align:right;">CPA <div class="text-val">${ad['cpa']:.2f}</div></div>
+        <div class="stat-box">CTR <div class="text-val">{ad['ctr']:.2f}%</div></div>
+        <div class="stat-box" style="text-align:right;">CPM <div class="text-val">${ad['cpm']:.2f}</div></div>
+      </div>
+      <div style="font-size:10px; color:#555; margin-top:8px; text-align:center;">
+        Live for {ad['days_live']} days
+      </div>
+    </div>
+  </div>
+</a>
+""",
+                                    unsafe_allow_html=True,
+                                )                    else:
                         for ad in ads:
                             img_src = ad.get('image_url') or "https://via.placeholder.com/100x100/222/888?text=Img"
                             roas_val = ad['roas']
